@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TheUlim Auction (LoL Draft)</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .container { max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        h1 { color: #007bff; text-align: center; }
+        .lobby, .auction { margin-top: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .player-list { list-style: none; padding: 0; }
+        .player-list li { margin-bottom: 5px; padding: 8px; background: #eee; border-radius: 3px; }
+        .ready-btn { background-color: #28a745; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 5px; margin-top: 10px; }
+        .auction-info { border: 2px solid #007bff; padding: 15px; margin-bottom: 15px; background: #e9f7ff; }
+        #timer { font-size: 2em; font-weight: bold; color: #dc3545; }
+        #log { margin-top: 20px; padding: 10px; background: #f9f9f9; max-height: 200px; overflow-y: scroll; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TheUlim Auction 🚀</h1>
+        <p>접속자: <span id="my-id"></span></p>
+
+        <div class="lobby" id="lobby-section">
+            <h2>로비</h2>
+            <p>
+                닉네임: <input type="text" id="nickname-input" placeholder="닉네임을 입력하세요">
+                <button onclick="setNickname()">변경</button>
+            </p>
+            <h3>접속 현황 (최대 3명)</h3>
+            <ul id="player-list" class="player-list">
+                </ul>
+            <button class="ready-btn" id="ready-btn" onclick="sendReady()">준비 완료</button>
+            <p id="lobby-status"></p>
+        </div>
+
+        <div class="auction" id="auction-section" style="display: none;">
+            <h2>현재 경매</h2>
+            <div class="auction-info">
+                <p>남은 시간: <span id="timer">--</span>초</p>
+                <p>선수: <span id="item-name">--</span> (<span id="item-position">--</span>)</p>
+                <p>현재가: <span id="current-price">0</span> 포인트</p>
+                <p>최고 입찰자: <span id="top-bidder">없음</span></p>
+            </div>
+            
+            <input type="number" id="bid-input" placeholder="최소 입찰가 +10">
+            <button onclick="sendBid()">입찰하기</button>
+
+            <h3>경매 로그</h3>
+            <div id="log"></div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let myId = '';
+        let myNickname = 'P?';
+        let currentItemId = null;
+
+        // --- UI 요소 맵핑 ---
+        const lobbySection = document.getElementById('lobby-section');
+        const auctionSection = document.getElementById('auction-section');
+        const nicknameInput = document.getElementById('nickname-input');
+        const playerList = document.getElementById('player-list');
+        const log = document.getElementById('log');
+
+        const timerDisplay = document.getElementById('timer');
+        const itemNameDisplay = document.getElementById('item-name');
+        const itemPositionDisplay = document.getElementById('item-position');
+        const currentPriceDisplay = document.getElementById('current-price');
+        const topBidderDisplay = document.getElementById('top-bidder');
+        const bidInput = document.getElementById('bid-input');
+        const readyBtn = document.getElementById('ready-btn');
+        const lobbyStatus = document.getElementById('lobby-status');
+
+
+        // --- SOCKET 수신 처리 ---
+
+        socket.on('player_info', (data) => {
+            myId = data.id;
+            myNickname = data.nickname;
+            document.getElementById('my-id').textContent = myNickname;
+            nicknameInput.value = myNickname;
+        });
+
+        socket.on('lobby_update', (data) => {
+            playerList.innerHTML = '';
+            data.players.forEach(p => {
+                const li = document.createElement('li');
+                li.textContent = `${p.nickname} [${p.ready ? '✅ 준비됨' : '❌ 미준비'}]`;
+                playerList.appendChild(li);
+            });
+        });
+
+        socket.on('game_start', (message) => {
+            logMessage(`[시스템] ${message}`, 'green');
+            lobbySection.style.display = 'none';
+            auctionSection.style.display = 'block';
+        });
+
+        socket.on('auction_start', (item) => {
+            currentItemId = item.id;
+            itemNameDisplay.textContent = item.name;
+            itemPositionDisplay.textContent = item.position;
+            currentPriceDisplay.textContent = item.price;
+            topBidderDisplay.textContent = '없음';
+            bidInput.value = item.price + 10;
+            logMessage(`[경매 시작] ${item.name} (${item.position})`, 'blue');
+        });
+
+        socket.on('update_timer', (data) => {
+            timerDisplay.textContent = data.time;
+        });
+
+        socket.on('update_bid', (data) => {
+            currentPriceDisplay.textContent = data.price;
+            topBidderDisplay.textContent = data.bidder;
+            bidInput.value = data.price + 10;
+            logMessage(`[입찰] ${data.bidder}: ${data.price} 포인트`, 'orange');
+        });
+
+        socket.on('auction_result', (data) => {
+            if (data.status === 'ACQUIRED') {
+                logMessage(`🏆 [낙찰] ${data.item.name}이(가) ${data.item.finalPrice}에 ${data.winner}에게 낙찰되었습니다!`, 'red');
+            } else if (data.status === 'FAILED') {
+                logMessage(`🚫 [유찰] ${data.item.name}은 유찰되었습니다.`, 'gray');
+            }
+            timerDisplay.textContent = '--';
+        });
+
+        socket.on('auto_acquisition', (data) => {
+            logMessage(`⭐ [자동 낙찰] ${data.item.name} (${data.item.position}) 선수가 ${data.winner}에게 0원에 자동 낙찰되었습니다!`, 'purple');
+        });
+
+        socket.on('error_message', (message) => {
+            logMessage(`[오류] ${message}`, 'red');
+        });
+
+        // --- SOCKET 송신 처리 (클릭 이벤트와 연결됨) ---
+
+        function setNickname() {
+            const nickname = nicknameInput.value.trim();
+            if (nickname) {
+                socket.emit('set_nickname', nickname);
+                myNickname = nickname;
+            }
+        }
+
+        function sendReady() {
+            socket.emit('ready');
+            readyBtn.disabled = true;
+            lobbyStatus.textContent = '준비 완료 대기 중...';
+        }
+
+        function sendBid() {
+            const price = parseInt(bidInput.value);
+            if (price && currentItemId) {
+                socket.emit('bid', price);
+            } else {
+                alert('유효한 입찰 금액을 입력하세요.');
+            }
+        }
+
+        // --- 기타 UI 함수 ---
+        function logMessage(message, color) {
+            const p = document.createElement('p');
+            p.textContent = message;
+            p.style.color = color;
+            log.prepend(p);
+        }
+        
+    </script>
+</body>
+</html>
