@@ -156,6 +156,23 @@
             auctionSection.style.display = 'block';
         });
 
+        socket.on('game_update', (data) => {
+            logMessage(`[시스템] ${data.message}`, 'blue');
+            
+            // ⭐ 로비로 돌아가는 메시지가 수신되면 UI 변경
+            if (data.message.includes('로비로 돌아갑니다')) {
+                lobbySection.style.display = 'block';
+                auctionSection.style.display = 'none';
+                readyBtn.disabled = false;
+                lobbyStatus.textContent = '';
+                // 경매 관련 UI 초기화
+                itemNameDisplay.textContent = '--';
+                itemPositionDisplay.textContent = '--';
+                currentPriceDisplay.textContent = '0';
+                topBidderDisplay.textContent = '없음';
+            }
+        });
+
         socket.on('auction_start', (item) => {
             currentItemId = item.id;
             currentBidPrice = 0; // 새로운 경매 시작 시 현재가 0으로 초기화
@@ -280,7 +297,7 @@
             lobbyStatus.textContent = '준비 완료 대기 중...';
         }
 
-        // 입찰 버튼 기능
+        // 입찰 금액 증가 기능
         function increaseBid(amount) {
             let currentInput = parseInt(bidInput.value) || 0;
             let newPrice = currentInput + amount;
@@ -299,7 +316,7 @@
             bidInput.value = newPrice;
         }
 
-        // ⭐ 입찰 금액 감소 기능 (추가됨)
+        // 입찰 금액 감소 기능
         function decreaseBid(amount) {
             let currentInput = parseInt(bidInput.value) || 0;
             let newPrice = currentInput - amount;
@@ -347,7 +364,7 @@
         window.sendReady = sendReady;
         window.sendBid = sendBid;
         window.increaseBid = increaseBid;
-        window.decreaseBid = decreaseBid; // ⭐ 추가
+        window.decreaseBid = decreaseBid; 
     </script>
 </body>
 </html>

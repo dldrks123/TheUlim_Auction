@@ -14,6 +14,7 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // --- 상수 및 전역 상태 관리 변수 ---
 let auctionItems = []; // CSV에서 로드된 전체 12명의 선수 목록
+let initialAuctionItems = []; // 초기 경매 아이템 상태 저장용
 let connectedPlayers = {}; 
 const MAX_PLAYERS = 3;
 
@@ -61,6 +62,45 @@ function getEligibleWinner(position) {
     }
     return null;
 }
+
+/**
+ * 게임 상태, 플레이어 포인트, 로스터를 초기화합니다. (서버 프로세스는 유지)
+ */
+function resetGame() {
+    console.log('\n--- 🔁 60초 타이머 만료: 게임 상태 초기화 시작 ---');
+    
+    // 1. 게임 상태 초기화
+    gameState = {
+        phase: 'Lobby',                   
+        currentItemIndex: 0,              
+        currentItem: null,
+        topBid: 0,
+        topBidderId: null,                
+        timer: 0,
+        auctionInterval: null,
+        posAcquired: { mid: 0, sup: 0, jungle: 0, ad: 0 }, 
+    };
+
+    // 2. 경매 아이템 목록 초기화 및 재셔플
+    // 초기 저장된 데이터를 Deep Copy하여 사용
+    auctionItems = JSON.parse(JSON.stringify(initialAuctionItems)); 
+    shuffleArray(auctionItems);
+
+    // 3. 플레이어 정보 초기화 (포인트 및 로스터)
+    for (const id in connectedPlayers) {
+        connectedPlayers[id].ready = false;
+        connectedPlayers[id].points = STARTING_POINTS;
+        connectedPlayers[id].roster = { mid: 0, sup: 0, jungle: 0, ad: 0, acquired: [] };
+    }
+
+    // 4. 클라이언트에게 초기화 상태 전송
+    io.emit('game_update', { message: '✅ 경매가 자동으로 초기화되어 로비로 돌아갑니다. "준비 완료" 버튼을 다시 눌러주세요.' });
+    io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
+    sendPlayerStatusUpdate();
+    sendAuctionStatusUpdate();
+    console.log('--- ✅ 게임 상태 초기화 완료. 로비 모드로 전환됨 ---');
+}
+
 
 /**
  * 낙찰 카운트가 2가 되었을 때 남은 1명을 자동 낙찰 처리합니다.
@@ -151,9 +191,22 @@ function checkEndOfAuction() {
         startFailedAuction(); // 2차 경매 진행
     } else {
         // 모든 경매 종료
-        io.emit('game_update', { message: '모든 경매가 최종 종료되었습니다.' });
         gameState.phase = 'Finished';
         console.log('--- 최종 경매 종료 ---');
+
+        // ⭐ 1분 후 자동 초기화 타이머 설정
+        io.emit('game_update', { message: '모든 경매가 최종 종료되었습니다. 60초 후 자동으로 로비로 돌아가 초기화됩니다.' });
+        
+        let countdown = 60;
+        const resetInterval = setInterval(() => {
+            countdown--;
+            io.emit('game_update', { message: `모든 경매가 최종 종료되었습니다. ${countdown}초 후 자동으로 로비로 돌아가 초기화됩니다.` });
+
+            if (countdown <= 0) {
+                clearInterval(resetInterval);
+                resetGame(); // 게임 상태 초기화 함수 호출
+            }
+        }, 1000);
     }
 }
 
@@ -170,7 +223,7 @@ function startNextItemAuction() {
     gameState.topBidderId = null;
     gameState.timer = MAX_TIME; // 1차 경매 기본 시간 12초
     
-    // 이미 낙찰된 아이템은 건너뜁니다.
+    // 이미 낙찰된 아이템은 건너뛰거나, 초기화된 배열에서 현재 인덱스에 있는 아이템이 UNSOLD인지 확인
     if (gameState.currentItem.status === 'ACQUIRED') {
         gameState.currentItemIndex++;
         return startNextItemAuction();
@@ -210,9 +263,22 @@ function endMainAuction() {
         // 유찰 경매 시작 함수 호출
         startFailedAuction();
     } else {
-        io.emit('game_update', { message: '모든 아이템 낙찰! 경매가 종료되었습니다.' });
+        // 모든 아이템 낙찰 시 바로 종료 처리 (자동 초기화 타이머 설정)
         gameState.phase = 'Finished';
         console.log('--- 경매 종료 ---');
+
+        io.emit('game_update', { message: '모든 아이템 낙찰! 경매가 최종 종료되었습니다. 60초 후 자동으로 로비로 돌아가 초기화됩니다.' });
+
+        let countdown = 60;
+        const resetInterval = setInterval(() => {
+            countdown--;
+            io.emit('game_update', { message: `모든 경매가 최종 종료되었습니다. ${countdown}초 후 자동으로 로비로 돌아가 초기화됩니다.` });
+
+            if (countdown <= 0) {
+                clearInterval(resetInterval);
+                resetGame(); // 게임 상태 초기화 함수 호출
+            }
+        }, 1000);
     }
 }
 
@@ -299,6 +365,8 @@ function loadCSV() {
             // 로드 완료 후 순서 랜덤 섞기
             shuffleArray(itemsBeforeShuffle);
             auctionItems = itemsBeforeShuffle;
+            // ⭐ 초기 상태 저장
+            initialAuctionItems = JSON.parse(JSON.stringify(itemsBeforeShuffle));
             console.log(`✅ ${auctionItems.length}명의 선수 로딩 및 순서 랜덤 섞기 완료.`);
         });
 }
@@ -313,7 +381,6 @@ io.on('connection', (socket) => {
             nickname: `P${Object.keys(connectedPlayers).length + 1}`,
             ready: false,
             points: STARTING_POINTS,
-            // 모든 포지션에 대한 로스터 카운트 초기화 확인
             roster: { mid: 0, sup: 0, jungle: 0, ad: 0, acquired: [] }
         };
         socket.emit('player_info', { id: socket.id, nickname: connectedPlayers[socket.id].nickname });
@@ -360,7 +427,7 @@ io.on('connection', (socket) => {
         const itemPosition = gameState.currentItem.position;
         const player = connectedPlayers[socket.id];
 
-        // ⭐ 1. 포지션별 2명 제한 체크 (모든 포지션에 적용됨)
+        // 1. 포지션별 2명 제한 체크
         if (player.roster[itemPosition] >= MAX_POS_PER_PLAYER) {
             return socket.emit('error_message', `${itemPosition.toUpperCase()} 포지션 선수는 이미 ${MAX_POS_PER_PLAYER}명을 보유하고 있어 더 이상 입찰할 수 없습니다.`);
         }
