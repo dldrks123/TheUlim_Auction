@@ -69,6 +69,10 @@
                     </div>
                     
                     <div class="bid-controls">
+                        <button class="bid-btn-inc" onclick="decreaseBid(10)">-10</button>
+                        <button class="bid-btn-inc" onclick="decreaseBid(50)">-50</button>
+                        <button class="bid-btn-inc" onclick="decreaseBid(100)">-100</button>
+
                         <input type="number" id="bid-input" placeholder="직접 입력" value="50">
                         
                         <button class="bid-btn-inc" onclick="increaseBid(10)">+10</button>
@@ -106,7 +110,7 @@
         let myNickname = 'P?';
         let currentItemId = null;
         let myPoints = 1000;
-        let currentBidPrice = 0; // ⭐ 현재 경매가 (UI 동기화용)
+        let currentBidPrice = 0; // 현재 경매가 (UI 동기화용)
         
         // --- UI 요소 맵핑 ---
         const lobbySection = document.getElementById('lobby-section');
@@ -244,14 +248,17 @@
                     statusText = '유찰';
                 } else {
                     statusText = '경매 예정/중';
-                    if(item.id === currentItemId) {
+                    
+                    // 현재 경매 중인 아이템 찾기: UNSOLD나 FAILED 중 가장 먼저 오는 아이템
+                    if(item.sequence === (auctionStatus.findIndex(i => i.status === 'UNSOLD' || i.status === 'FAILED') + 1)) {
                          statusText = '⭐ 경매 중';
                          statusClass += ' item-status-current';
                     }
                 }
 
                 li.className = statusClass;
-                li.innerHTML = `(${item.id}) <strong>${item.name}</strong> (${item.position}) - ${statusText}`;
+                // 순서 번호(sequence) 사용
+                li.innerHTML = `(${item.sequence}) <strong>${item.name}</strong> (${item.position}) - ${statusText}`; 
                 auctionStatusList.appendChild(li);
             });
         });
@@ -273,7 +280,7 @@
             lobbyStatus.textContent = '준비 완료 대기 중...';
         }
 
-        // ⭐ 입찰 버튼 기능
+        // 입찰 버튼 기능
         function increaseBid(amount) {
             let currentInput = parseInt(bidInput.value) || 0;
             let newPrice = currentInput + amount;
@@ -288,6 +295,25 @@
             if (newPrice < minRequired) {
                 newPrice = minRequired;
             }
+
+            bidInput.value = newPrice;
+        }
+
+        // ⭐ 입찰 금액 감소 기능 (추가됨)
+        function decreaseBid(amount) {
+            let currentInput = parseInt(bidInput.value) || 0;
+            let newPrice = currentInput - amount;
+            
+            // 입찰가 최소 기준 (현재가가 0이면 50, 아니면 현재가+10)
+            const minRequired = currentBidPrice === 0 ? 50 : currentBidPrice + 10;
+            
+            // 최소 입찰 금액 이하로 내려가지 않도록 보정
+            if (newPrice < minRequired) {
+                newPrice = minRequired;
+            }
+
+            // 10단위로 보정
+            newPrice = Math.ceil(newPrice / 10) * 10;
 
             bidInput.value = newPrice;
         }
@@ -320,7 +346,8 @@
         window.setNickname = setNickname;
         window.sendReady = sendReady;
         window.sendBid = sendBid;
-        window.increaseBid = increaseBid; // ⭐ 추가된 함수 노출
+        window.increaseBid = increaseBid;
+        window.decreaseBid = decreaseBid; // ⭐ 추가
     </script>
 </body>
 </html>
