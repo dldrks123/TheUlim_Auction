@@ -25,7 +25,7 @@ let gameState = {
     topBidderId: null,                
     timer: 0, 
     auctionInterval: null,
-    transitionInterval: null, // ⭐ 트랜지션 인터벌 추가
+    transitionInterval: null, 
     posAcquired: { mid: 0, sup: 0, jungle: 0, ad: 0 }, 
 };
 
@@ -33,11 +33,11 @@ let gameState = {
 const MAX_TIME = 12;        
 const FAILED_START_TIME = 15; 
 const BID_INCREMENT = 10;
-const MIN_START_BID = 10; // ⭐ 10p로 변경
+const MIN_START_BID = 10; // 10p로 변경
 const ANTI_SNIPING_WINDOW = 3; 
 const ANTI_SNIPING_RESET = 7; 
 const STARTING_POINTS = 1000; 
-const MAX_POS_PER_PLAYER = 2; 
+const MAX_POS_PER_PLAYER = 2; // 포지션별 최대 보유 개수는 2개지만, 1개 보유 시 입찰 불가로 로직 수정됨
 
 // --- 헬퍼 함수 ---
 
@@ -98,7 +98,6 @@ function resetGame() {
 
 
 function checkAndHandleAutoAcquisition(position) {
-    // ... (로직 생략 - 변화 없음)
     if (gameState.posAcquired[position] === MAX_PLAYERS - 1) {
         const remainingItem = auctionItems.find(item => 
             item.position === position && item.status !== 'ACQUIRED'
@@ -135,6 +134,7 @@ function startTransition() {
 
     // 1차 경매인 경우
     if (gameState.phase === 'Bidding_Main') {
+        // 이미 ACQUIRED 된 아이템은 건너뛰고 다음 UNACQUIRED 아이템을 찾음
         while (nextItemIndex < auctionItems.length && auctionItems[nextItemIndex].status === 'ACQUIRED') {
             nextItemIndex++;
         }
@@ -142,11 +142,12 @@ function startTransition() {
             nextItem = auctionItems[nextItemIndex];
         }
     } 
-    // 유찰 경매인 경우 (유찰된 아이템 목록에서 다음 순서를 찾습니다)
+    // 유찰 경매인 경우 
     else if (gameState.phase === 'Bidding_Failed') {
         const failedItems = auctionItems.filter(i => i.status === 'FAILED');
         if (gameState.currentItemIndex + 1 < failedItems.length) {
              nextItem = failedItems[gameState.currentItemIndex + 1];
+             nextItemIndex = gameState.currentItemIndex + 1;
         }
     }
     
@@ -231,7 +232,13 @@ function checkEndOfAuction() {
  */
 function startNextItemAuctionOrFailedAuction() {
     if (gameState.phase === 'Transition') {
-        gameState.phase = 'Bidding_Main'; // Transition이 끝났으므로 다시 메인 페이즈로
+        // Transition이 끝난 후 어떤 단계였는지에 따라 phase를 복구
+        const failedItems = auctionItems.filter(i => i.status === 'FAILED');
+        if (failedItems.length > 0 && gameState.currentItemIndex < failedItems.length) {
+            gameState.phase = 'Bidding_Failed';
+        } else {
+             gameState.phase = 'Bidding_Main';
+        }
     }
 
     if (gameState.phase === 'Bidding_Main' && gameState.currentItemIndex < auctionItems.length) {
@@ -251,7 +258,7 @@ function startNextItemAuctionOrFailedAuction() {
  */
 function startNextItemAuction() {
     if (gameState.currentItemIndex >= auctionItems.length) {
-        return;
+        return endMainAuction();
     }
     
     gameState.currentItem = auctionItems[gameState.currentItemIndex];
@@ -317,7 +324,9 @@ function endMainAuction() {
         
         startTransition(); // 유찰 경매 시작 전 5초 대기
     } else {
-        handleFinalEnd();
+        // 유찰이 없을 경우, 인덱스를 배열 길이 밖으로 이동하여 안전장치 마련
+        gameState.currentItemIndex = auctionItems.length; 
+        handleFinalEnd(); // 최종 종료 처리
     }
 }
 
@@ -352,7 +361,6 @@ function startFailedAuction() {
 }
 
 function sendPlayerStatusUpdate() {
-    // ... (로직 생략 - 변화 없음)
     const playerStatuses = Object.entries(connectedPlayers).map(([id, player]) => ({
         id: id,
         nickname: player.nickname,
@@ -364,7 +372,6 @@ function sendPlayerStatusUpdate() {
 }
 
 function sendAuctionStatusUpdate() {
-    // ... (로직 생략 - 변화 없음)
     const auctionStatus = auctionItems.map((item, index) => ({
         sequence: index + 1, 
         name: item.name,
@@ -405,7 +412,6 @@ loadCSV();
 // --- Socket.io 이벤트 핸들러 ---
 io.on('connection', (socket) => {
     
-    // ... (연결 및 로비 로직 생략 - 변화 없음)
     if (Object.keys(connectedPlayers).length < MAX_PLAYERS) {
         connectedPlayers[socket.id] = {
             nickname: `P${Object.keys(connectedPlayers).length + 1}`,
@@ -458,12 +464,12 @@ io.on('connection', (socket) => {
         const itemPosition = gameState.currentItem.position;
         const player = connectedPlayers[socket.id];
 
-        // 1. 포지션별 2명 제한 체크
-        if (player.roster[itemPosition] >= MAX_POS_PER_PLAYER) {
-            return socket.emit('error_message', `${itemPosition.toUpperCase()} 포지션 선수는 이미 ${MAX_POS_PER_PLAYER}명을 보유하고 있어 더 이상 입찰할 수 없습니다.`);
+        // ⭐ 1. 포지션별 1명 이상 보유 시 입찰 금지 (수정된 로직)
+        if (player.roster[itemPosition] >= 1) { 
+            return socket.emit('error_message', `${itemPosition.toUpperCase()} 포지션 선수는 이미 보유하고 있어 입찰할 수 없습니다. (1명 제한)`);
         }
 
-        // 2. 연속 입찰 금지 (스나이핑 방지 로직과 분리하여 확실히 체크)
+        // 2. 연속 입찰 금지
         if (socket.id === gameState.topBidderId) {
             return socket.emit('error_message', '연속 입찰은 불가능합니다. 다음 플레이어만 입찰할 수 있습니다.');
         }
@@ -513,7 +519,6 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
-        // ... (연결 끊김 로직 생략 - 변화 없음)
         delete connectedPlayers[socket.id];
         io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
         sendPlayerStatusUpdate();

@@ -144,6 +144,7 @@
         let myPoints = 1000;
         let currentBidPrice = 0; 
         const MIN_START_BID = 10; 
+        let connectedPlayers = {}; // ⭐ UI 입찰 제한 로직을 위해 서버 정보를 저장할 클라이언트 측 변수
 
         // --- UI 요소 맵핑 ---
         const lobbySection = document.getElementById('lobby-section');
@@ -176,6 +177,28 @@
             const requiredPrice = currentPrice === 0 ? MIN_START_BID : currentPrice + 10;
             minBidInfo.textContent = `최소 입찰 가능 금액: ${requiredPrice}p`;
         }
+        
+        // ⭐ 새로운 헬퍼 함수 추가: 입찰 컨트롤 상태 업데이트
+        function updateBidControlsStatus(itemPosition) {
+            const myPlayer = connectedPlayers[myId];
+            // 로스터에서 해당 포지션의 보유 개수가 1개 이상인지 확인
+            const hasPosition = myPlayer && myPlayer.roster[itemPosition] >= 1; 
+            const controls = bidControls.querySelectorAll('button, input');
+
+            if (hasPosition) {
+                // 입찰 불가: 버튼/입력창 비활성화
+                controls.forEach(ctrl => ctrl.disabled = true);
+                minBidInfo.textContent = `${itemPosition.toUpperCase()} 포지션을 이미 보유하고 있어 입찰할 수 없습니다. (1명 제한)`;
+                minBidInfo.style.color = 'red';
+            } else {
+                // 입찰 가능: 활성화 (단, transition 중이 아닐 경우)
+                if (auctionSection.style.display !== 'none' && transitionBox.style.display === 'none') { 
+                    controls.forEach(ctrl => ctrl.disabled = false);
+                }
+                minBidInfo.style.color = '#333';
+                updateMinBidInfo(currentBidPrice); // 최소 입찰 정보 복구
+            }
+        }
 
         function setBidControlsDisabled(disabled) {
             const buttons = bidControls.querySelectorAll('button');
@@ -185,8 +208,14 @@
             if (!disabled) {
                 const requiredPrice = currentBidPrice === 0 ? MIN_START_BID : currentBidPrice + 10;
                 bidInput.value = requiredPrice;
+                
+                // ⭐ 비활성화 해제 후에도 포지션 보유 여부 재확인
+                if (gameState.currentItem) {
+                    updateBidControlsStatus(gameState.currentItem.position);
+                }
             }
         }
+
 
         // --- SOCKET 수신 처리 ---
 
@@ -232,14 +261,17 @@
         socket.on('transition_start', (data) => {
             transitionBox.style.display = 'block';
             timerDisplay.textContent = '--';
-            setBidControlsDisabled(true); // 입찰 버튼 비활성화
+            setBidControlsDisabled(true); // 입찰 버튼 비활성화 (포지션 보유 여부와 무관하게 비활성화)
 
             const status = data.currentItem.status === 'ACQUIRED' ? '낙찰' : '유찰';
             const itemInfo = `${data.currentItem.name} (${data.currentItem.position}) ${status}됨`;
             logMessage(`[대기] ${itemInfo}. 5초 후 다음 매물이 시작됩니다.`, 'purple');
             
             transitionTimer.textContent = data.countdown;
-            nextItemPreview.textContent = `다음 선수: ${data.nextItem.name} (${data.nextItem.position})`;
+            
+            let nextItemName = data.nextItem ? data.nextItem.name : '--';
+            let nextItemPosition = data.nextItem ? data.nextItem.position : '--';
+            nextItemPreview.textContent = `다음 선수: ${nextItemName} (${nextItemPosition})`;
 
             // 현재 경매 정보 초기화
             currentItemId = null;
@@ -256,20 +288,30 @@
             transitionTimer.textContent = data.countdown;
             if (data.countdown <= 0) {
                 transitionBox.style.display = 'none';
-                setBidControlsDisabled(false); // 입찰 버튼 활성화
+                // setBidControlsDisabled(false); // auction_start에서 처리되므로 제거
             }
         });
 
+        // ⭐ 경매 시작 이벤트 수정 (UI 컨트롤 상태 업데이트 로직 추가)
         socket.on('auction_start', (item) => {
+            // 현재 아이템 정보 업데이트
+            gameState.currentItem = item; // 현재 경매 아이템 정보 저장 (UI 로직에서 사용)
             currentItemId = item.id;
             currentBidPrice = 0; 
+            
+            // UI 업데이트
             itemNameDisplay.textContent = item.name;
             itemPositionDisplay.textContent = item.position;
+            itemPositionDisplay.dataset.position = item.position; // 포지션 정보 dataset에 저장
             currentPriceDisplay.textContent = currentBidPrice;
             topBidderDisplay.textContent = '없음';
             updateMinBidInfo(currentBidPrice);
             
             logMessage(`[경매 시작] ${item.name} (${item.position})`, 'blue');
+            
+            // ⭐ 입찰 버튼 활성화 및 포지션 보유 여부에 따른 비활성화/활성화 처리
+            setBidControlsDisabled(false); 
+            updateBidControlsStatus(item.position); 
         });
 
         socket.on('update_timer', (data) => {
@@ -302,13 +344,25 @@
             logMessage(`[오류] ${message}`, 'red');
         });
         
-        // 플레이어 상태 업데이트 (포인트, 로스터)
+        // ⭐ 플레이어 상태 업데이트 (로스터 정보를 클라이언트에서 사용하도록 수정)
         socket.on('player_status_update', (playerStatuses) => {
             playerStatusPanel.innerHTML = '';
+            
+            // 플레이어 로스터 정보를 클라이언트 측 전역 변수에 저장
+            const currentPlayerRoster = {mid: 0, sup: 0, jungle: 0, ad: 0};
+            
             playerStatuses.forEach(p => {
                 if (p.id === myId) {
                     myPoints = p.points;
                     myPointsDisplay.textContent = p.points;
+                    
+                    // 클라이언트에서 포지션별 보유 개수를 카운트하여 저장
+                    p.roster.forEach(item => {
+                        currentPlayerRoster[item.position] = (currentPlayerRoster[item.position] || 0) + 1;
+                    });
+                    
+                    // myId에 해당하는 플레이어 정보만 간단하게 저장
+                    connectedPlayers[p.id] = { roster: currentPlayerRoster };
                 }
 
                 const card = document.createElement('div');
@@ -333,6 +387,11 @@
                 `;
                 playerStatusPanel.appendChild(card);
             });
+            
+            // ⭐ 플레이어 상태가 업데이트된 후, 현재 경매 중이고 myId 정보가 있으면 입찰 버튼 상태 갱신
+            if (myId && (gameState.phase === 'Bidding_Main' || gameState.phase === 'Bidding_Failed') && gameState.currentItem) {
+                updateBidControlsStatus(gameState.currentItem.position); 
+            }
         });
 
         // 전체 경매 현황 업데이트 (12명 목록)
@@ -435,13 +494,30 @@
             p.style.color = color;
             log.prepend(p);
         }
-
-        // Global exposure
+        
+        // --- 전역 노출 (HTML 인라인 이벤트용) ---
         window.setNickname = setNickname;
         window.sendReady = sendReady;
         window.sendBid = sendBid;
         window.increaseBid = increaseBid;
         window.decreaseBid = decreaseBid; 
+        
+        // --- 게임 상태 객체 (클라이언트 측에서 phase, currentItem 정보 저장을 위해 사용) ---
+        const gameState = {
+            phase: 'Lobby',
+            currentItem: null
+        };
+        
+        // 서버에서 페이즈 정보를 받을 때마다 업데이트 (간단히만 사용)
+        socket.on('game_update', (data) => {
+            if (data.message.includes('경매를 시작합니다')) gameState.phase = 'Bidding_Main';
+            if (data.message.includes('로비로 돌아갑니다')) gameState.phase = 'Lobby';
+        });
+        socket.on('transition_start', () => {
+             gameState.phase = 'Transition';
+        });
+        // auction_start에서 phase가 Bidding_Main 또는 Bidding_Failed로 설정되어야 함
+        
     </script>
 </body>
 </html>
