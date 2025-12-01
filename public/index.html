@@ -6,10 +6,11 @@
     <title>TheUlim Auction (LoL Draft)</title>
     <script src="/socket.io/socket.io.js"></script>
     <style>
+        /* ⭐ UI 수정: 경매 순서를 왼쪽 하단으로 이동 및 전체 레이아웃 조정 */
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
-        .main-container { max-width: 1200px; margin: auto; display: flex; gap: 20px; }
-        .left-panel { flex: 2; }
-        .right-panel { flex: 1; }
+        .main-container { max-width: 1400px; /* 전체 너비 약간 확장 */ margin: auto; display: flex; gap: 20px; }
+        .left-panel { flex: 3; /* 메인/순서 패널 */ }
+        .right-panel { flex: 2; /* 플레이어 상태 패널 */ }
         .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
         h1 { color: #007bff; text-align: center; margin-bottom: 20px;}
         h2 { border-bottom: 2px solid #007bff; padding-bottom: 5px; margin-bottom: 15px; }
@@ -17,6 +18,7 @@
         .player-list { list-style: none; padding: 0; }
         .player-list li { margin-bottom: 5px; padding: 8px; background: #eee; border-radius: 3px; }
         .ready-btn { background-color: #28a745; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 5px; margin-top: 10px; }
+        
         .auction-info { border: 2px solid #007bff; padding: 15px; margin-bottom: 15px; background: #e9f7ff; }
         #timer { font-size: 2em; font-weight: bold; color: #dc3545; }
         #log { margin-top: 20px; padding: 10px; background: #f9f9f9; max-height: 200px; overflow-y: scroll; border: 1px solid #ccc; }
@@ -27,20 +29,42 @@
         .bid-controls button { padding: 10px 15px; font-weight: bold; cursor: pointer; border: none; border-radius: 5px; }
         .bid-controls .bid-btn-inc { background-color: #ffc107; color: #333; }
         .bid-controls .bid-btn-main { background-color: #007bff; color: white; }
+        .bid-controls button:disabled { background-color: #ccc; cursor: not-allowed; } 
 
         /* 플레이어 상태 UI */
         .player-card { border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px; }
-        .current-bidder { border: 2px solid #ffc107; background-color: #fff8e1 !important; } /* ⭐ 최고 입찰자 강조 */
+        .current-bidder { border: 2px solid #ffc107; background-color: #fff8e1 !important; } 
         .roster-list { font-size: 0.9em; margin-top: 5px; }
-        .auction-item-list { list-style: none; padding: 0; font-size: 0.9em;}
+        
+        /* 경매 순서 UI (왼쪽 패널로 이동) */
+        .auction-status-container {
+            margin-top: 20px;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .auction-item-list { list-style: none; padding: 0; font-size: 0.9em; max-height: 300px; overflow-y: auto; }
         .auction-item-list li { padding: 5px; border-bottom: 1px dotted #eee; }
         .item-status-ACQUIRED { color: green; font-weight: bold; }
         .item-status-FAILED { color: orange; }
         .item-status-UNSOLD { color: #333; }
+
+        /* 트랜지션 UI */
+        #transition-box { 
+            border: 3px dashed #007bff; 
+            padding: 15px; 
+            margin-bottom: 15px; 
+            text-align: center;
+            background: #e9f7ff;
+        }
+        #transition-timer { font-size: 3em; font-weight: bold; color: #dc3545; }
+        #next-item-preview { margin-top: 10px; font-size: 1.1em; }
     </style>
 </head>
 <body>
     <div class="main-container">
+        
         <div class="left-panel">
             <div class="container">
                 <h1>TheUlim Auction 🚀</h1>
@@ -60,20 +84,28 @@
                 </div>
 
                 <div class="auction" id="auction-section" style="display: none;">
+                    
+                    <div id="transition-box" style="display: none;">
+                        <h3>경매 종료! 잠시 후 다음 매물이 시작됩니다.</h3>
+                        <p id="transition-timer">5</p>
+                        <p id="next-item-preview">다음 선수: --</p>
+                    </div>
+
                     <h2>현재 경매</h2>
                     <div class="auction-info">
                         <p>남은 시간: <span id="timer">--</span>초</p>
                         <p>선수: <span id="item-name">--</span> (<span id="item-position">--</span>)</p>
                         <p>현재가: <span id="current-price">0</span> 포인트</p>
                         <p>최고 입찰자: <span id="top-bidder">없음</span></p>
+                        <p id="min-bid-info">최소 입찰 가능 금액: 10p</p>
                     </div>
                     
-                    <div class="bid-controls">
+                    <div class="bid-controls" id="bid-controls">
                         <button class="bid-btn-inc" onclick="decreaseBid(10)">-10</button>
                         <button class="bid-btn-inc" onclick="decreaseBid(50)">-50</button>
                         <button class="bid-btn-inc" onclick="decreaseBid(100)">-100</button>
 
-                        <input type="number" id="bid-input" placeholder="직접 입력" value="50">
+                        <input type="number" id="bid-input" placeholder="직접 입력" value="10"> 
                         
                         <button class="bid-btn-inc" onclick="increaseBid(10)">+10</button>
                         <button class="bid-btn-inc" onclick="increaseBid(50)">+50</button>
@@ -86,6 +118,12 @@
                     <div id="log"></div>
                 </div>
             </div>
+            
+            <div class="auction-status-container">
+                <h2>경매 순서 및 현황 (총 12명)</h2>
+                <ul id="auction-status-list" class="auction-item-list">
+                    </ul>
+            </div>
         </div>
 
         <div class="right-panel">
@@ -93,12 +131,6 @@
                 <h2>플레이어 상태</h2>
                 <div id="player-status-panel">
                     </div>
-            </div>
-            
-            <div class="container">
-                <h2>경매 순서 및 현황 (총 12명)</h2>
-                <ul id="auction-status-list" class="auction-item-list">
-                    </ul>
             </div>
         </div>
     </div>
@@ -110,8 +142,9 @@
         let myNickname = 'P?';
         let currentItemId = null;
         let myPoints = 1000;
-        let currentBidPrice = 0; // 현재 경매가 (UI 동기화용)
-        
+        let currentBidPrice = 0; 
+        const MIN_START_BID = 10; 
+
         // --- UI 요소 맵핑 ---
         const lobbySection = document.getElementById('lobby-section');
         const auctionSection = document.getElementById('auction-section');
@@ -130,7 +163,30 @@
         const bidInput = document.getElementById('bid-input');
         const readyBtn = document.getElementById('ready-btn');
         const lobbyStatus = document.getElementById('lobby-status');
+        const minBidInfo = document.getElementById('min-bid-info');
+        const bidControls = document.getElementById('bid-controls');
+        const transitionBox = document.getElementById('transition-box');
+        const transitionTimer = document.getElementById('transition-timer');
+        const nextItemPreview = document.getElementById('next-item-preview');
 
+
+        // --- 헬퍼 함수 ---
+        
+        function updateMinBidInfo(currentPrice) {
+            const requiredPrice = currentPrice === 0 ? MIN_START_BID : currentPrice + 10;
+            minBidInfo.textContent = `최소 입찰 가능 금액: ${requiredPrice}p`;
+        }
+
+        function setBidControlsDisabled(disabled) {
+            const buttons = bidControls.querySelectorAll('button');
+            const input = bidControls.querySelector('input');
+            buttons.forEach(btn => btn.disabled = disabled);
+            input.disabled = disabled;
+            if (!disabled) {
+                const requiredPrice = currentBidPrice === 0 ? MIN_START_BID : currentBidPrice + 10;
+                bidInput.value = requiredPrice;
+            }
+        }
 
         // --- SOCKET 수신 처리 ---
 
@@ -159,7 +215,6 @@
         socket.on('game_update', (data) => {
             logMessage(`[시스템] ${data.message}`, 'blue');
             
-            // ⭐ 로비로 돌아가는 메시지가 수신되면 UI 변경
             if (data.message.includes('로비로 돌아갑니다')) {
                 lobbySection.style.display = 'block';
                 auctionSection.style.display = 'none';
@@ -173,14 +228,47 @@
             }
         });
 
+        // 트랜지션 시작 (5초 대기)
+        socket.on('transition_start', (data) => {
+            transitionBox.style.display = 'block';
+            timerDisplay.textContent = '--';
+            setBidControlsDisabled(true); // 입찰 버튼 비활성화
+
+            const status = data.currentItem.status === 'ACQUIRED' ? '낙찰' : '유찰';
+            const itemInfo = `${data.currentItem.name} (${data.currentItem.position}) ${status}됨`;
+            logMessage(`[대기] ${itemInfo}. 5초 후 다음 매물이 시작됩니다.`, 'purple');
+            
+            transitionTimer.textContent = data.countdown;
+            nextItemPreview.textContent = `다음 선수: ${data.nextItem.name} (${data.nextItem.position})`;
+
+            // 현재 경매 정보 초기화
+            currentItemId = null;
+            currentBidPrice = 0; 
+            itemNameDisplay.textContent = '--';
+            itemPositionDisplay.textContent = '--';
+            currentPriceDisplay.textContent = currentBidPrice;
+            topBidderDisplay.textContent = '없음';
+            updateMinBidInfo(currentBidPrice);
+        });
+
+        // 트랜지션 타이머 업데이트
+        socket.on('transition_update', (data) => {
+            transitionTimer.textContent = data.countdown;
+            if (data.countdown <= 0) {
+                transitionBox.style.display = 'none';
+                setBidControlsDisabled(false); // 입찰 버튼 활성화
+            }
+        });
+
         socket.on('auction_start', (item) => {
             currentItemId = item.id;
-            currentBidPrice = 0; // 새로운 경매 시작 시 현재가 0으로 초기화
+            currentBidPrice = 0; 
             itemNameDisplay.textContent = item.name;
             itemPositionDisplay.textContent = item.position;
             currentPriceDisplay.textContent = currentBidPrice;
             topBidderDisplay.textContent = '없음';
-            bidInput.value = 50; // 첫 입찰 최소 50p로 설정
+            updateMinBidInfo(currentBidPrice);
+            
             logMessage(`[경매 시작] ${item.name} (${item.position})`, 'blue');
         });
 
@@ -189,12 +277,11 @@
         });
 
         socket.on('update_bid', (data) => {
-            currentBidPrice = data.price; // 서버에서 받은 현재가 업데이트
+            currentBidPrice = data.price; 
             currentPriceDisplay.textContent = data.price;
             topBidderDisplay.textContent = data.bidder;
+            updateMinBidInfo(currentBidPrice); 
             
-            // 다음 입찰가를 10p 증가하여 input에 자동 설정
-            bidInput.value = data.price + 10; 
             logMessage(`[입찰] ${data.bidder}: ${data.price} 포인트`, 'orange');
         });
 
@@ -219,7 +306,6 @@
         socket.on('player_status_update', (playerStatuses) => {
             playerStatusPanel.innerHTML = '';
             playerStatuses.forEach(p => {
-                // 내 포인트 업데이트
                 if (p.id === myId) {
                     myPoints = p.points;
                     myPointsDisplay.textContent = p.points;
@@ -227,7 +313,6 @@
 
                 const card = document.createElement('div');
                 card.className = 'player-card';
-                // ⭐ 최고 입찰자 및 본인 강조
                 if (p.isTopBidder) {
                     card.classList.add('current-bidder');
                 } else if (p.id === myId) {
@@ -266,7 +351,6 @@
                 } else {
                     statusText = '경매 예정/중';
                     
-                    // 현재 경매 중인 아이템 찾기: UNSOLD나 FAILED 중 가장 먼저 오는 아이템
                     if(item.sequence === (auctionStatus.findIndex(i => i.status === 'UNSOLD' || i.status === 'FAILED') + 1)) {
                          statusText = '⭐ 경매 중';
                          statusClass += ' item-status-current';
@@ -274,7 +358,6 @@
                 }
 
                 li.className = statusClass;
-                // 순서 번호(sequence) 사용
                 li.innerHTML = `(${item.sequence}) <strong>${item.name}</strong> (${item.position}) - ${statusText}`; 
                 auctionStatusList.appendChild(li);
             });
@@ -302,13 +385,10 @@
             let currentInput = parseInt(bidInput.value) || 0;
             let newPrice = currentInput + amount;
             
-            // 입찰가 최소 기준 (현재가가 0이면 50, 아니면 현재가+10)
-            const minRequired = currentBidPrice === 0 ? 50 : currentBidPrice + 10;
+            const minRequired = currentBidPrice === 0 ? MIN_START_BID : currentBidPrice + 10;
             
-            // 10단위로 보정
             newPrice = Math.ceil(newPrice / 10) * 10;
             
-            // 최소 입찰가보다 작은 경우, 최소 입찰가로 설정
             if (newPrice < minRequired) {
                 newPrice = minRequired;
             }
@@ -321,15 +401,12 @@
             let currentInput = parseInt(bidInput.value) || 0;
             let newPrice = currentInput - amount;
             
-            // 입찰가 최소 기준 (현재가가 0이면 50, 아니면 현재가+10)
-            const minRequired = currentBidPrice === 0 ? 50 : currentBidPrice + 10;
+            const minRequired = currentBidPrice === 0 ? MIN_START_BID : currentBidPrice + 10;
             
-            // 최소 입찰 금액 이하로 내려가지 않도록 보정
             if (newPrice < minRequired) {
                 newPrice = minRequired;
             }
 
-            // 10단위로 보정
             newPrice = Math.ceil(newPrice / 10) * 10;
 
             bidInput.value = newPrice;
