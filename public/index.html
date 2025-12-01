@@ -77,6 +77,9 @@
                         닉네임: <input type="text" id="nickname-input" placeholder="닉네임을 입력하세요">
                         <button onclick="setNickname()">변경</button>
                     </p>
+                    <p>
+                        시작 포인트: <input type="number" id="initial-points-input" value="1000" min="100" step="100">
+                    </p>
                     <h3>접속 현황 (3/3명 필요)</h3>
                     <ul id="player-list" class="player-list"></ul>
                     <button class="ready-btn" id="ready-btn" onclick="sendReady()">준비 완료</button>
@@ -150,6 +153,7 @@
         const lobbySection = document.getElementById('lobby-section');
         const auctionSection = document.getElementById('auction-section');
         const nicknameInput = document.getElementById('nickname-input');
+        const initialPointsInput = document.getElementById('initial-points-input'); // ⭐ 추가
         const playerList = document.getElementById('player-list');
         const log = document.getElementById('log');
         const myPointsDisplay = document.getElementById('my-points');
@@ -224,13 +228,18 @@
             myNickname = data.nickname;
             document.getElementById('my-id').textContent = myNickname;
             nicknameInput.value = myNickname;
+            myPointsDisplay.textContent = data.initialPoints;
+            initialPointsInput.value = data.initialPoints; // ⭐ 초기 포인트 UI에도 반영
         });
 
+        // ⭐ lobby_update 수정: 시작 포인트 정보도 표시
         socket.on('lobby_update', (data) => {
             playerList.innerHTML = '';
             data.players.forEach(p => {
                 const li = document.createElement('li');
-                li.textContent = `${p.nickname} [${p.ready ? '✅ 준비됨' : '❌ 미준비'}]`;
+                // ⭐ 로비 목록에 포인트 정보 추가
+                const pointDisplay = p.initialPoints ? `(${p.initialPoints}p 시작)` : '(포인트 미설정)';
+                li.textContent = `${p.nickname} ${pointDisplay} [${p.ready ? '✅ 준비됨' : '❌ 미준비'}]`;
                 playerList.appendChild(li);
             });
         });
@@ -288,7 +297,6 @@
             transitionTimer.textContent = data.countdown;
             if (data.countdown <= 0) {
                 transitionBox.style.display = 'none';
-                // setBidControlsDisabled(false); // auction_start에서 처리되므로 제거
             }
         });
 
@@ -348,7 +356,7 @@
         socket.on('player_status_update', (playerStatuses) => {
             playerStatusPanel.innerHTML = '';
             
-            // 플레이어 로스터 정보를 클라이언트 측 전역 변수에 저장
+            // 클라이언트에서 포지션별 보유 개수를 카운트하여 저장하기 위한 변수
             const currentPlayerRoster = {mid: 0, sup: 0, jungle: 0, ad: 0};
             
             playerStatuses.forEach(p => {
@@ -425,13 +433,20 @@
 
         // --- SOCKET 송신 처리 (클릭 이벤트와 연결됨) ---
 
+        // ⭐ setNickname 함수 수정: 닉네임과 함께 포인트도 전송하도록 변경
         function setNickname() {
             const nickname = nicknameInput.value.trim();
-            if (nickname) {
-                socket.emit('set_nickname', nickname);
+            const initialPoints = parseInt(initialPointsInput.value);
+
+            if (nickname && initialPoints >= 100 && initialPoints % 100 === 0) {
+                // ⭐ 서버로 닉네임과 함께 초기 포인트를 전송
+                socket.emit('set_player_config', { nickname: nickname, initialPoints: initialPoints }); 
                 myNickname = nickname;
+            } else {
+                alert('닉네임과 유효한 시작 포인트(100 단위 이상)를 입력하세요.');
             }
         }
+
 
         function sendReady() {
             socket.emit('ready');
@@ -516,7 +531,6 @@
         socket.on('transition_start', () => {
              gameState.phase = 'Transition';
         });
-        // auction_start에서 phase가 Bidding_Main 또는 Bidding_Failed로 설정되어야 함
         
     </script>
 </body>

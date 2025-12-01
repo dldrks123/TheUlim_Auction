@@ -36,8 +36,8 @@ const BID_INCREMENT = 10;
 const MIN_START_BID = 10; // 10p로 변경
 const ANTI_SNIPING_WINDOW = 3; 
 const ANTI_SNIPING_RESET = 7; 
-const STARTING_POINTS = 1000; 
-const MAX_POS_PER_PLAYER = 2; // 포지션별 최대 보유 개수는 2개지만, 1개 보유 시 입찰 불가로 로직 수정됨
+// const STARTING_POINTS = 1000; // ⭐ 삭제: 클라이언트 입력으로 받음
+const MAX_POS_PER_PLAYER = 2; 
 
 // --- 헬퍼 함수 ---
 
@@ -50,6 +50,7 @@ function shuffleArray(array) {
 
 function getEligibleWinner(position) {
     for (const id in connectedPlayers) {
+        // 포지션별 최대 보유 개수가 2개이지만, 자동 낙찰은 0개인 플레이어에게만 적용
         if (connectedPlayers[id].roster[position] === 0) {
             return id;
         }
@@ -84,13 +85,18 @@ function resetGame() {
     // 3. 플레이어 정보 초기화 (포인트 및 로스터)
     for (const id in connectedPlayers) {
         connectedPlayers[id].ready = false;
-        connectedPlayers[id].points = STARTING_POINTS;
+        // ⭐ 초기 포인트는 기존에 설정된 initialPoints를 사용
+        connectedPlayers[id].points = connectedPlayers[id].initialPoints || 1000; 
         connectedPlayers[id].roster = { mid: 0, sup: 0, jungle: 0, ad: 0, acquired: [] };
     }
 
     // 4. 클라이언트에게 초기화 상태 전송
     io.emit('game_update', { message: '✅ 경매가 자동으로 초기화되어 로비로 돌아갑니다. "준비 완료" 버튼을 다시 눌러주세요.' });
-    io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
+    io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
+        nickname: p.nickname, 
+        ready: p.ready,
+        initialPoints: p.initialPoints 
+    })) });
     sendPlayerStatusUpdate();
     sendAuctionStatusUpdate();
     console.log('--- ✅ 게임 상태 초기화 완료. 로비 모드로 전환됨 ---');
@@ -416,11 +422,17 @@ io.on('connection', (socket) => {
         connectedPlayers[socket.id] = {
             nickname: `P${Object.keys(connectedPlayers).length + 1}`,
             ready: false,
-            points: STARTING_POINTS,
+            points: 1000, // 초기 설정 전 임시 기본값
+            initialPoints: 1000, // ⭐ 초기 설정 값 저장용 필드 추가
             roster: { mid: 0, sup: 0, jungle: 0, ad: 0, acquired: [] }
         };
-        socket.emit('player_info', { id: socket.id, nickname: connectedPlayers[socket.id].nickname });
-        io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
+        // ⭐ 클라이언트에게 초기 포인트 정보도 함께 전송
+        socket.emit('player_info', { id: socket.id, nickname: connectedPlayers[socket.id].nickname, initialPoints: connectedPlayers[socket.id].initialPoints });
+        io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
+            nickname: p.nickname, 
+            ready: p.ready,
+            initialPoints: p.initialPoints // ⭐ 로비 UI 업데이트를 위해 전송
+        })) });
         
         sendPlayerStatusUpdate();
         sendAuctionStatusUpdate();
@@ -431,23 +443,52 @@ io.on('connection', (socket) => {
         return;
     }
 
-    socket.on('set_nickname', (nickname) => {
-        if (connectedPlayers[socket.id]) {
-            connectedPlayers[socket.id].nickname = nickname;
-            io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
-            sendPlayerStatusUpdate(); 
-        }
-    });
+    // ⭐ [수정 반영] 닉네임 및 초기 포인트 설정 이벤트 핸들러
+    socket.on('set_player_config', (data) => {
+        if (connectedPlayers[socket.id]) {
+            const { nickname, initialPoints } = data;
+            
+            // 데이터 유효성 검사
+            if (!nickname || typeof initialPoints !== 'number' || initialPoints < 100 || initialPoints % 100 !== 0) {
+                 return socket.emit('error_message', '유효하지 않은 닉네임 또는 시작 포인트입니다. (100 단위 이상)');
+            }
+            
+            connectedPlayers[socket.id].nickname = nickname;
+            connectedPlayers[socket.id].initialPoints = initialPoints; // 초기 설정 포인트 저장
+            connectedPlayers[socket.id].points = initialPoints; // 현재 포인트도 즉시 업데이트
+
+            io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
+                nickname: p.nickname, 
+                ready: p.ready,
+                initialPoints: p.initialPoints // ⭐ 로비 UI 업데이트를 위해 전송
+            })) });
+            sendPlayerStatusUpdate(); 
+        }
+    });
 
     socket.on('ready', () => {
         if (connectedPlayers[socket.id] && !connectedPlayers[socket.id].ready && gameState.phase === 'Lobby') {
+            
+            // ⭐ [추가된 부분] 준비 완료 시 모든 플레이어가 포인트를 설정했는지 확인
+            const allPointsSet = Object.values(connectedPlayers).every(p => p.initialPoints && p.initialPoints >= 100);
+            if (!allPointsSet) {
+                 return socket.emit('error_message', '모든 플레이어가 유효한 시작 포인트를 설정해야 게임을 시작할 수 있습니다.');
+            }
+            // ---------------------------------
+            
             connectedPlayers[socket.id].ready = true;
             
             const readyCount = Object.values(connectedPlayers).filter(p => p.ready).length;
-            io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
+            io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
+                nickname: p.nickname, 
+                ready: p.ready,
+                initialPoints: p.initialPoints // 로비 UI 업데이트를 위해 전송
+            })) });
 
             if (readyCount === MAX_PLAYERS) {
                 gameState.phase = 'Bidding_Main';
+                // ⭐ 게임 시작 시 현재 포인트(initialPoints와 동일)로 설정
+                Object.values(connectedPlayers).forEach(p => p.points = p.initialPoints); 
                 io.emit('game_start', '3명 모두 준비 완료! 경매를 시작합니다.');
                 startNextItemAuction();
             }
@@ -464,7 +505,7 @@ io.on('connection', (socket) => {
         const itemPosition = gameState.currentItem.position;
         const player = connectedPlayers[socket.id];
 
-        // ⭐ 1. 포지션별 1명 이상 보유 시 입찰 금지 (수정된 로직)
+        // ⭐ 1. 포지션별 1명 이상 보유 시 입찰 금지 (수정된 로직 반영)
         if (player.roster[itemPosition] >= 1) { 
             return socket.emit('error_message', `${itemPosition.toUpperCase()} 포지션 선수는 이미 보유하고 있어 입찰할 수 없습니다. (1명 제한)`);
         }
@@ -520,7 +561,12 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         delete connectedPlayers[socket.id];
-        io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
+        // ⭐ 로비 업데이트 로직 수정
+        io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
+            nickname: p.nickname, 
+            ready: p.ready,
+            initialPoints: p.initialPoints
+        })) });
         sendPlayerStatusUpdate();
     });
 });
