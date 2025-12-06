@@ -13,7 +13,7 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // --- 상수 및 전역 상태 관리 변수 ---
 let auctionItems = []; 
-let initialAuctionItems = []; 
+let initialAuctionItems = []; // ⭐ 원본 아이템 리스트 (1차 경매 대상)
 let connectedPlayers = {}; 
 const MAX_PLAYERS = 3;
 
@@ -33,11 +33,10 @@ let gameState = {
 const MAX_TIME = 12;        
 const FAILED_START_TIME = 15; 
 const BID_INCREMENT = 10;
-const MIN_START_BID = 10; // 10p로 변경
+const MIN_START_BID = 10; 
 const ANTI_SNIPING_WINDOW = 3; 
 const ANTI_SNIPING_RESET = 7; 
-// const STARTING_POINTS = 1000; // ⭐ 삭제: 클라이언트 입력으로 받음
-const MAX_POS_PER_PLAYER = 2; 
+const MAX_POS_PER_PLAYER = 1; // 포지션별 1명 제한으로 가정
 
 // --- 헬퍼 함수 ---
 
@@ -48,9 +47,12 @@ function shuffleArray(array) {
     }
 }
 
+/**
+ * 해당 포지션을 0개 보유한 플레이어 ID를 반환합니다.
+ */
 function getEligibleWinner(position) {
     for (const id in connectedPlayers) {
-        // 포지션별 최대 보유 개수가 2개이지만, 자동 낙찰은 0개인 플레이어에게만 적용
+        // 포지션을 0개 보유한 플레이어를 찾음 (1명 제한 로직 하에서 자동 낙찰 대상)
         if (connectedPlayers[id].roster[position] === 0) {
             return id;
         }
@@ -61,11 +63,9 @@ function getEligibleWinner(position) {
 function resetGame() {
     console.log('\n--- 🔁 60초 타이머 만료: 게임 상태 초기화 시작 ---');
     
-    // 이전 인터벌 클리어
     if (gameState.auctionInterval) clearInterval(gameState.auctionInterval);
     if (gameState.transitionInterval) clearInterval(gameState.transitionInterval);
 
-    // 1. 게임 상태 초기화
     gameState = {
         phase: 'Lobby',                   
         currentItemIndex: 0,              
@@ -82,15 +82,13 @@ function resetGame() {
     auctionItems = JSON.parse(JSON.stringify(initialAuctionItems));
     shuffleArray(auctionItems);
 
-    // 3. 플레이어 정보 초기화 (포인트 및 로스터)
+    // 3. 플레이어 정보 초기화
     for (const id in connectedPlayers) {
         connectedPlayers[id].ready = false;
-        // ⭐ 초기 포인트는 기존에 설정된 initialPoints를 사용
         connectedPlayers[id].points = connectedPlayers[id].initialPoints || 1000; 
         connectedPlayers[id].roster = { mid: 0, sup: 0, jungle: 0, ad: 0, acquired: [] };
     }
 
-    // 4. 클라이언트에게 초기화 상태 전송
     io.emit('game_update', { message: '✅ 경매가 자동으로 초기화되어 로비로 돌아갑니다. "준비 완료" 버튼을 다시 눌러주세요.' });
     io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
         nickname: p.nickname, 
@@ -102,23 +100,48 @@ function resetGame() {
     console.log('--- ✅ 게임 상태 초기화 완료. 로비 모드로 전환됨 ---');
 }
 
-
+/**
+ * ⭐ [수정 로직 반영] 자동 낙찰 로직.
+ * 특정 포지션의 3명 중 2명이 낙찰되었고, 남은 1명의 선수가 아직 경매에 나오지 않았거나 유찰 상태일 때, 
+ * 포지션을 0개 가진 유일한 플레이어에게 0원에 자동 낙찰합니다. (1명 제한 로직 하에서)
+ */
 function checkAndHandleAutoAcquisition(position) {
+    // 1. 해당 포지션에 대해 3명 중 2명(MAX_PLAYERS-1)이 확보되었는지 확인 (자동 낙찰 발동 조건)
     if (gameState.posAcquired[position] === MAX_PLAYERS - 1) {
-        const remainingItem = auctionItems.find(item => 
+        
+        // 2. 남은 선수 (미낙찰 상태인 선수)를 찾습니다. (auctionItems 전체를 탐색)
+        const remainingItem = initialAuctionItems.find(item => 
             item.position === position && item.status !== 'ACQUIRED'
         );
+
         if (remainingItem) {
             const autoWinnerId = getEligibleWinner(position);
+            
+            // 3. 해당 포지션의 선수를 0개 보유한 유일한 플레이어가 남아있는 경우
             if (autoWinnerId) {
-                remainingItem.status = 'ACQUIRED';
+                
+                // 해당 아이템의 상태를 ACQUIRED로 변경하고, 원본 리스트(auctionItems)에도 반영
+                // (경매 리스트에서 상태 업데이트)
+                const targetIndex = auctionItems.findIndex(item => item.id === remainingItem.id);
+                if (targetIndex !== -1) {
+                    auctionItems[targetIndex].status = 'ACQUIRED';
+                    auctionItems[targetIndex].finalPrice = 0;
+                    auctionItems[targetIndex].winnerId = autoWinnerId;
+                }
+                
+                // (선수 리스트의 상태 업데이트)
+                remainingItem.status = 'ACQUIRED'; 
                 remainingItem.finalPrice = 0;
                 remainingItem.winnerId = autoWinnerId;
+                
+                // 4. 플레이어 로스터 업데이트
                 gameState.posAcquired[position]++; 
                 connectedPlayers[autoWinnerId].roster[position]++;
                 connectedPlayers[autoWinnerId].roster.acquired.push({
                     name: remainingItem.name, price: 0, position: remainingItem.position
                 });
+                
+                // 5. 클라이언트에게 결과 전송
                 io.emit('auto_acquisition', { 
                     item: remainingItem, winner: connectedPlayers[autoWinnerId].nickname 
                 });
@@ -130,6 +153,7 @@ function checkAndHandleAutoAcquisition(position) {
     }
 }
 
+
 /**
  * 낙찰 또는 유찰 후 다음 경매로 넘어가기 전 5초 대기 상태를 시작합니다.
  */
@@ -138,9 +162,8 @@ function startTransition() {
     let nextItem = null;
     let nextItemIndex = gameState.currentItemIndex + 1;
 
-    // 1차 경매인 경우
+    // 1차 경매인 경우 (ACQUIRED 건너뛰기)
     if (gameState.phase === 'Bidding_Main') {
-        // 이미 ACQUIRED 된 아이템은 건너뛰고 다음 UNACQUIRED 아이템을 찾음
         while (nextItemIndex < auctionItems.length && auctionItems[nextItemIndex].status === 'ACQUIRED') {
             nextItemIndex++;
         }
@@ -148,12 +171,13 @@ function startTransition() {
             nextItem = auctionItems[nextItemIndex];
         }
     } 
-    // 유찰 경매인 경우 
+    // 유찰 경매인 경우 (FAILED 아이템만 순회)
     else if (gameState.phase === 'Bidding_Failed') {
         const failedItems = auctionItems.filter(i => i.status === 'FAILED');
         if (gameState.currentItemIndex + 1 < failedItems.length) {
              nextItem = failedItems[gameState.currentItemIndex + 1];
-             nextItemIndex = gameState.currentItemIndex + 1;
+             // 유찰 경매 리스트의 인덱스이므로 nextItemIndex는 1 증가
+             nextItemIndex = gameState.currentItemIndex + 1; 
         }
     }
     
@@ -170,12 +194,20 @@ function startTransition() {
 
             if (countdown <= 0) {
                 clearInterval(gameState.transitionInterval);
-                gameState.currentItemIndex = nextItemIndex;
+                
+                // 인덱스 업데이트 로직 분리:
+                if (gameState.phase === 'Bidding_Main') {
+                    // 1차 경매는 원본 리스트를 순회하므로, ACQUIRED를 건너뛴 최종 인덱스로 업데이트
+                    gameState.currentItemIndex = auctionItems.findIndex(item => item.id === nextItem.id); 
+                } else if (gameState.phase === 'Bidding_Failed') {
+                    // 2차 경매는 유찰 리스트 인덱스로 업데이트
+                    gameState.currentItemIndex = nextItemIndex;
+                }
+                
                 startNextItemAuctionOrFailedAuction();
             }
         }, 1000);
     } else {
-        // 더 이상 경매할 아이템이 없으면 종료 처리
         checkEndOfAuction();
     }
 }
@@ -203,6 +235,8 @@ function checkEndOfAuction() {
         sendPlayerStatusUpdate(); 
         sendAuctionStatusUpdate();
         console.log(`[낙찰] ${item.name}이(가) ${item.finalPrice}에 낙찰. 낙찰자: ${winner.nickname}`);
+        
+        // ⭐ 낙찰 후 자동 낙찰 조건 체크 (이 부분이 중요)
         checkAndHandleAutoAcquisition(position);
     } else {
         // 유찰 처리
@@ -212,33 +246,35 @@ function checkEndOfAuction() {
         console.log(`[유찰] ${item.name} 경매 실패.`);
     }
 
-    // 다음 경매가 남아있는지 확인하고, 남아있다면 Transition 시작
-    // 1차 경매가 끝났다면 endMainAuction()에서 다음 단계를 처리합니다.
-    if (gameState.phase === 'Bidding_Main' && gameState.currentItemIndex < auctionItems.length - 1) {
-        // 다음 아이템이 낙찰된 경우를 대비하여 startTransition에서 index를 조정합니다.
-        startTransition();
-    } else if (gameState.phase === 'Bidding_Main' && gameState.currentItemIndex === auctionItems.length - 1) {
-        endMainAuction(); // 1차 경매의 마지막 아이템 처리 후 2차 경매 시작 여부 결정
-    } else if (gameState.phase === 'Bidding_Failed') {
-        const failedItems = auctionItems.filter(i => i.status === 'FAILED');
-        if (gameState.currentItemIndex < failedItems.length - 1) {
-            startTransition(); // 2차 경매 중 다음 아이템으로 Transition
+    // 다음 경매 인덱스 이동 및 다음 단계 결정
+    if (gameState.phase === 'Bidding_Main') {
+        gameState.currentItemIndex++; // 현재 1차 경매 아이템 인덱스 증가
+        if (gameState.currentItemIndex < auctionItems.length) {
+             startTransition();
         } else {
-            // 2차 경매 마지막 아이템 처리
-            handleFinalEnd();
+             endMainAuction(); // 1차 경매 종료
+        }
+    } else if (gameState.phase === 'Bidding_Failed') {
+        gameState.currentItemIndex++; // 유찰 경매 리스트 인덱스 증가
+        const failedItems = auctionItems.filter(i => i.status === 'FAILED');
+        if (gameState.currentItemIndex < failedItems.length) {
+            startTransition();
+        } else {
+            handleFinalEnd(); // 2차 경매 종료
         }
     } else {
-        // 모든 경매 종료 처리
+        // 이미 종료 상태이거나 기타 상태일 경우 최종 종료 처리
         handleFinalEnd();
     }
 }
+
 
 /**
  * Transition 종료 후 다음 경매(1차 또는 2차)를 시작하는 헬퍼 함수
  */
 function startNextItemAuctionOrFailedAuction() {
     if (gameState.phase === 'Transition') {
-        // Transition이 끝난 후 어떤 단계였는지에 따라 phase를 복구
+        // Transition이 끝난 후 다음 단계를 결정
         const failedItems = auctionItems.filter(i => i.status === 'FAILED');
         if (failedItems.length > 0 && gameState.currentItemIndex < failedItems.length) {
             gameState.phase = 'Bidding_Failed';
@@ -249,8 +285,6 @@ function startNextItemAuctionOrFailedAuction() {
 
     if (gameState.phase === 'Bidding_Main' && gameState.currentItemIndex < auctionItems.length) {
         startNextItemAuction();
-    } else if (gameState.phase === 'Bidding_Main' && gameState.currentItemIndex >= auctionItems.length) {
-        endMainAuction();
     } else if (gameState.phase === 'Bidding_Failed') {
         startFailedAuction(); 
     } else {
@@ -326,13 +360,14 @@ function endMainAuction() {
         io.emit('game_update', { message: `1차 경매 종료. ${failedItems.length}개 유찰. 유찰 경매를 시작합니다!` });
         console.log('--- 1차 경매 종료. 유찰 경매 시작 ---');
         
+        // 2차 경매를 위한 리스트는 'FAILED' 아이템만 남깁니다.
         auctionItems = auctionItems.filter(item => item.status !== 'ACQUIRED'); 
         
         startTransition(); // 유찰 경매 시작 전 5초 대기
     } else {
-        // 유찰이 없을 경우, 인덱스를 배열 길이 밖으로 이동하여 안전장치 마련
+        // 유찰이 없을 경우, 최종 종료 처리
         gameState.currentItemIndex = auctionItems.length; 
-        handleFinalEnd(); // 최종 종료 처리
+        handleFinalEnd(); 
     }
 }
 
@@ -378,7 +413,8 @@ function sendPlayerStatusUpdate() {
 }
 
 function sendAuctionStatusUpdate() {
-    const auctionStatus = auctionItems.map((item, index) => ({
+    // 1차 경매 아이템 리스트(initialAuctionItems)의 상태를 기준으로 UI 업데이트
+    const auctionStatus = initialAuctionItems.map((item, index) => ({
         sequence: index + 1, 
         name: item.name,
         position: item.position,
@@ -406,9 +442,14 @@ function loadCSV() {
             });
         })
         .on('end', () => {
-            shuffleArray(itemsBeforeShuffle);
-            auctionItems = itemsBeforeShuffle;
-            initialAuctionItems = JSON.parse(JSON.stringify(itemsBeforeShuffle));
+            // 1. 초기 전체 목록 (순서 미정) 저장
+            initialAuctionItems = itemsBeforeShuffle;
+            
+            // 2. 경매용 목록은 셔플 후 저장
+            const auctionList = JSON.parse(JSON.stringify(itemsBeforeShuffle));
+            shuffleArray(auctionList);
+            auctionItems = auctionList;
+            
             console.log(`✅ ${auctionItems.length}명의 선수 로딩 및 순서 랜덤 섞기 완료.`);
         });
 }
@@ -422,16 +463,15 @@ io.on('connection', (socket) => {
         connectedPlayers[socket.id] = {
             nickname: `P${Object.keys(connectedPlayers).length + 1}`,
             ready: false,
-            points: 1000, // 초기 설정 전 임시 기본값
-            initialPoints: 1000, // ⭐ 초기 설정 값 저장용 필드 추가
+            points: 1000, 
+            initialPoints: 1000, 
             roster: { mid: 0, sup: 0, jungle: 0, ad: 0, acquired: [] }
         };
-        // ⭐ 클라이언트에게 초기 포인트 정보도 함께 전송
         socket.emit('player_info', { id: socket.id, nickname: connectedPlayers[socket.id].nickname, initialPoints: connectedPlayers[socket.id].initialPoints });
         io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
             nickname: p.nickname, 
             ready: p.ready,
-            initialPoints: p.initialPoints // ⭐ 로비 UI 업데이트를 위해 전송
+            initialPoints: p.initialPoints 
         })) });
         
         sendPlayerStatusUpdate();
@@ -443,24 +483,23 @@ io.on('connection', (socket) => {
         return;
     }
 
-    // ⭐ [수정 반영] 닉네임 및 초기 포인트 설정 이벤트 핸들러
+    // 닉네임 및 초기 포인트 설정 이벤트 핸들러
     socket.on('set_player_config', (data) => {
         if (connectedPlayers[socket.id]) {
             const { nickname, initialPoints } = data;
             
-            // 데이터 유효성 검사
             if (!nickname || typeof initialPoints !== 'number' || initialPoints < 100 || initialPoints % 100 !== 0) {
                  return socket.emit('error_message', '유효하지 않은 닉네임 또는 시작 포인트입니다. (100 단위 이상)');
             }
             
             connectedPlayers[socket.id].nickname = nickname;
-            connectedPlayers[socket.id].initialPoints = initialPoints; // 초기 설정 포인트 저장
-            connectedPlayers[socket.id].points = initialPoints; // 현재 포인트도 즉시 업데이트
+            connectedPlayers[socket.id].initialPoints = initialPoints; 
+            connectedPlayers[socket.id].points = initialPoints; 
 
             io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
                 nickname: p.nickname, 
                 ready: p.ready,
-                initialPoints: p.initialPoints // ⭐ 로비 UI 업데이트를 위해 전송
+                initialPoints: p.initialPoints 
             })) });
             sendPlayerStatusUpdate(); 
         }
@@ -469,12 +508,10 @@ io.on('connection', (socket) => {
     socket.on('ready', () => {
         if (connectedPlayers[socket.id] && !connectedPlayers[socket.id].ready && gameState.phase === 'Lobby') {
             
-            // ⭐ [추가된 부분] 준비 완료 시 모든 플레이어가 포인트를 설정했는지 확인
             const allPointsSet = Object.values(connectedPlayers).every(p => p.initialPoints && p.initialPoints >= 100);
             if (!allPointsSet) {
                  return socket.emit('error_message', '모든 플레이어가 유효한 시작 포인트를 설정해야 게임을 시작할 수 있습니다.');
             }
-            // ---------------------------------
             
             connectedPlayers[socket.id].ready = true;
             
@@ -482,12 +519,11 @@ io.on('connection', (socket) => {
             io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
                 nickname: p.nickname, 
                 ready: p.ready,
-                initialPoints: p.initialPoints // 로비 UI 업데이트를 위해 전송
+                initialPoints: p.initialPoints 
             })) });
 
             if (readyCount === MAX_PLAYERS) {
                 gameState.phase = 'Bidding_Main';
-                // ⭐ 게임 시작 시 현재 포인트(initialPoints와 동일)로 설정
                 Object.values(connectedPlayers).forEach(p => p.points = p.initialPoints); 
                 io.emit('game_start', '3명 모두 준비 완료! 경매를 시작합니다.');
                 startNextItemAuction();
@@ -501,13 +537,12 @@ io.on('connection', (socket) => {
         if (gameState.phase !== 'Bidding_Main' && gameState.phase !== 'Bidding_Failed') return;
         if (!connectedPlayers[socket.id] || !gameState.currentItem) return;
         
-        // 현재 입찰하려는 포지션
         const itemPosition = gameState.currentItem.position;
         const player = connectedPlayers[socket.id];
 
-        // ⭐ 1. 포지션별 1명 이상 보유 시 입찰 금지 (수정된 로직 반영)
-        if (player.roster[itemPosition] >= 1) { 
-            return socket.emit('error_message', `${itemPosition.toUpperCase()} 포지션 선수는 이미 보유하고 있어 입찰할 수 없습니다. (1명 제한)`);
+        // 1. 포지션별 1명 이상 보유 시 입찰 금지 
+        if (player.roster[itemPosition] >= MAX_POS_PER_PLAYER) { 
+            return socket.emit('error_message', `${itemPosition.toUpperCase()} 포지션 선수는 이미 보유하고 있어 입찰할 수 없습니다. (${MAX_POS_PER_PLAYER}명 제한)`);
         }
 
         // 2. 연속 입찰 금지
@@ -522,7 +557,7 @@ io.on('connection', (socket) => {
 
         const currentPrice = gameState.topBid;
         
-        // 4. 최소 입찰 금액 계산 (10p 시작 & 10p 증분)
+        // 4. 최소 입찰 금액 계산
         let requiredPrice;
         if (currentPrice === 0) {
             requiredPrice = MIN_START_BID;
@@ -561,7 +596,6 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         delete connectedPlayers[socket.id];
-        // ⭐ 로비 업데이트 로직 수정
         io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ 
             nickname: p.nickname, 
             ready: p.ready,
