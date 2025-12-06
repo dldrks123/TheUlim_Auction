@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TheUlim Auction (LoL Draft)</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        /* 제공해주신 디자인 CSS 유지 */
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .main-container { max-width: 1200px; margin: auto; display: flex; gap: 20px; }
+        .left-panel { flex: 2; }
+        .right-panel { flex: 1; }
+        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1 { color: #007bff; text-align: center; margin-bottom: 20px;}
+        h2 { border-bottom: 2px solid #007bff; padding-bottom: 5px; margin-bottom: 15px; }
+        .lobby, .auction { margin-top: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .player-list { list-style: none; padding: 0; }
+        .player-list li { margin-bottom: 5px; padding: 8px; background: #eee; border-radius: 3px; }
+        .ready-btn { background-color: #28a745; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 5px; margin-top: 10px; }
+        .auction-info { border: 2px solid #007bff; padding: 15px; margin-bottom: 15px; background: #e9f7ff; }
+        #timer { font-size: 2em; font-weight: bold; color: #dc3545; }
+        #log { margin-top: 20px; padding: 10px; background: #f9f9f9; max-height: 200px; overflow-y: scroll; border: 1px solid #ccc; }
+        
+        /* 입찰 버튼 그룹 */
+        .bid-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px;}
+        .bid-controls input[type="number"] { padding: 8px; width: 100px; text-align: right; }
+        .bid-controls button { padding: 10px 15px; font-weight: bold; cursor: pointer; border: none; border-radius: 5px; }
+        .bid-controls .bid-btn-inc { background-color: #ffc107; color: #333; }
+        .bid-controls .bid-btn-main { background-color: #007bff; color: white; flex-grow: 1; }
+        .bid-controls button:disabled { background-color: #ccc; cursor: not-allowed; }
+
+        /* 플레이어 상태 UI */
+        .player-card { border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px; }
+        .current-bidder { border: 3px solid #ffc107; background-color: #fff8e1 !important; } /* ⭐ 최고 입찰자 강조 */
+        .roster-list { font-size: 0.9em; margin-top: 5px; }
+        .auction-item-list { list-style: none; padding: 0; font-size: 0.9em;}
+        .auction-item-list li { padding: 5px; border-bottom: 1px dotted #eee; }
+        .item-status-ACQUIRED { color: green; font-weight: bold; }
+        .item-status-FAILED { color: orange; }
+        .item-status-UNSOLD { color: #333; }
+        .item-status-current { background-color: #f0f8ff; border-left: 5px solid #007bff; padding-left: 10px;} /* 현재 경매 중인 아이템 */
+        .player-cannot-bid { opacity: 0.6; } /* 포지션 제한 등으로 입찰 불가 */
+
+        /* ⭐ 6. 다음 경매 대기 UI */
+        #wait-info { 
+            text-align: center; 
+            padding: 20px; 
+            background: #e6ffe6; /* 연한 초록색 */
+            border: 2px dashed #28a745;
+            border-radius: 8px; 
+            margin-bottom: 15px;
+        }
+        #wait-timer { font-size: 3em; font-weight: bold; color: #28a745; }
+
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <div class="left-panel">
+            <div class="container">
+                <h1>TheUlim Auction 🚀</h1>
+                <p>접속자: <span id="my-id"></span></p>
+                <p>내 남은 포인트: <strong id="my-points">1000</strong>p</p>
+
+                <div class="lobby" id="lobby-section">
+                    <h2>로비</h2>
+                    <p>
+                        닉네임: <input type="text" id="nickname-input" placeholder="닉네임을 입력하세요">
+                        <br>
+                        시작 포인트: <input type="number" id="start-points-input" value="1000" min="10" step="10" style="width: 100px; text-align: right;">p
+                        <button onclick="setNicknameAndPoints()">변경</button>
+                    </p>
+                    <h3>접속 현황 (3/3명 필요)</h3>
+                    <ul id="player-list" class="player-list"></ul>
+                    <button class="ready-btn" id="ready-btn" onclick="sendReady()" disabled>준비 완료</button>
+                    <p id="lobby-status"></p>
+                </div>
+
+                <div class="auction" id="auction-section" style="display: none;">
+
+                    <div id="wait-info" style="display: none;">
+                        <h3>경매 대기 중...</h3>
+                        <p>다음 선수: <strong id="next-item-name">--</strong> (<strong id="next-item-position">--</strong>)</p>
+                        <p>남은 시간: <span id="wait-timer">--</span>초</p>
+                    </div>
+                    
+                    <h2 id="auction-title">현재 경매</h2>
+
+                    <div class="auction-info">
+                        <p>남은 시간: <span id="timer">--</span>초</p>
+                        <p>선수: <strong id="item-name">--</strong> (<strong id="item-position">--</strong>)</p>
+                        <p>현재가: <strong id="current-price">0</strong> 포인트</p>
+                        <p>최고 입찰자: <strong id="top-bidder">없음</strong></p>
+                    </div>
+                    
+                    <div class="bid-controls">
+                        <button class="bid-btn-inc" onclick="decreaseBid(10)">-10</button>
+                        <button class="bid-btn-inc" onclick="decreaseBid(50)">-50</button>
+                        <button class="bid-btn-inc" onclick="decreaseBid(100)">-100</button>
+
+                        <input type="number" id="bid-input" placeholder="직접 입력" value="10" oninput="updateBidButtonState()">
+                        
+                        <button class="bid-btn-inc" onclick="increaseBid(10)">+10</button>
+                        <button class="bid-btn-inc" onclick="increaseBid(50)">+50</button>
+                        <button class="bid-btn-inc" onclick="increaseBid(100)">+100</button>
+                        
+                        <button class="bid-btn-main" id="bid-button" onclick="sendBid()" disabled>입찰하기</button>
+                    </div>
+                    <p id="bid-restriction-message" style="color: red; margin-top: 10px; font-weight: bold;"></p>
+
+
+                    <h3>경매 로그</h3>
+                    <div id="log"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="right-panel">
+            <div class="container">
+                <h2>플레이어 상태</h2>
+                <div id="player-status-panel">
+                </div>
+            </div>
+            
+            <div class="container">
+                <h2>경매 순서 및 현황 (총 12명)</h2>
+                <ul id="auction-status-list" class="auction-item-list">
+                </ul>
+            </div>
+        </div>
+    </div>
+
+
+<script>
+    const socket = io();
+    let myId = '';
+    let myNickname = 'P?';
+    let currentItemId = null;
+    let myPoints = 1000;
+    let currentBidPrice = 0; // 현재 경매가 (UI 동기화용)
+    let currentTopBidderId = null; // 최고 입찰자 ID
+    let currentItemPosition = null; // 현재 경매 선수의 포지션 (소문자)
+    // 포지션별 최대 1명으로 제한 (서버와 동일하게 1로 가정)
+    const MAX_POS_PER_PLAYER = 1;
+    let myRoster = { top: 0, mid: 0, sup: 0, jungle: 0, ad: 0, top: 0 }; // 내 로스터 상태 저장 (포지션별 카운트)
+
+    // --- UI 요소 맵핑 ---
+    const lobbySection = document.getElementById('lobby-section');
+    const auctionSection = document.getElementById('auction-section');
+    const nicknameInput = document.getElementById('nickname-input');
+    const startPointsInput = document.getElementById('start-points-input');
+    const playerList = document.getElementById('player-list');
+    const log = document.getElementById('log');
+    const myPointsDisplay = document.getElementById('my-points');
+    const playerStatusPanel = document.getElementById('player-status-panel');
+    const auctionStatusList = document.getElementById('auction-status-list');
+
+    const timerDisplay = document.getElementById('timer');
+    const itemNameDisplay = document.getElementById('item-name');
+    const itemPositionDisplay = document.getElementById('item-position');
+    const currentPriceDisplay = document.getElementById('current-price');
+    const topBidderDisplay = document.getElementById('top-bidder');
+    const bidInput = document.getElementById('bid-input');
+    const readyBtn = document.getElementById('ready-btn');
+    const lobbyStatus = document.getElementById('lobby-status');
+    const bidButton = document.getElementById('bid-button');
+    const bidRestrictionMessage = document.getElementById('bid-restriction-message');
+
+    // 다음 경매 대기 UI
+    const waitInfo = document.getElementById('wait-info');
+    const auctionTitle = document.getElementById('auction-title');
+    const waitTimer = document.getElementById('wait-timer');
+    const nextItemName = document.getElementById('next-item-name');
+    const nextItemPosition = document.getElementById('next-item-position');
+
+
+    // --- SOCKET 수신 처리 ---
+
+    socket.on('player_info', (data) => {
+        myId = data.id;
+        myNickname = data.nickname;
+        myPoints = data.points;
+        
+        document.getElementById('my-id').textContent = myNickname;
+        nicknameInput.value = myNickname;
+        startPointsInput.value = myPoints;
+        myPointsDisplay.textContent = myPoints;
+        
+        // 닉네임 설정 성공 후 준비 버튼 활성화
+        readyBtn.disabled = false;
+    });
+
+    socket.on('lobby_update', (data) => {
+        playerList.innerHTML = '';
+        data.players.forEach(p => {
+            const li = document.createElement('li');
+            li.textContent = `${p.nickname} [${p.ready ? '✅ 준비됨' : '❌ 미준비'}]`;
+            playerList.appendChild(li);
+        });
+    });
+
+    socket.on('game_start', (message) => {
+        logMessage(`[시스템] ${message}`, 'green');
+        lobbySection.style.display = 'none';
+        auctionSection.style.display = 'block';
+    });
+
+    socket.on('game_update', (data) => {
+        logMessage(`[시스템] ${data.message}`, 'blue');
+        
+        if (data.message.includes('로비로 돌아갑니다')) {
+            lobbySection.style.display = 'block';
+            auctionSection.style.display = 'none';
+            readyBtn.disabled = false;
+            lobbyStatus.textContent = '';
+            
+            // 초기화
+            currentItemId = null;
+            currentItemPosition = null;
+            currentBidPrice = 0;
+            waitInfo.style.display = 'none';
+            auctionTitle.style.display = 'block';
+            auctionTitle.textContent = '현재 경매'; // 제목 초기화
+        }
+    });
+
+    // 다음 경매 대기 타이머 업데이트
+    socket.on('pre_auction_wait', (data) => {
+        waitInfo.style.display = 'block';
+        auctionTitle.style.display = 'none';
+        timerDisplay.textContent = '--';
+        currentItemId = null; // 경매 대기 중에는 아이템 ID 비우기
+        currentItemPosition = null; // 포지션 비우기
+        currentBidPrice = 0; // 경매 대기 중에는 현재가 0으로 초기화
+        currentTopBidderId = null; // 최고 입찰자 ID 초기화
+
+        waitTimer.textContent = data.time;
+        nextItemName.textContent = data.nextItem ? data.nextItem.name : '경매 종료';
+        nextItemPosition.textContent = data.nextItem ? data.nextItem.position.toUpperCase() : '--';
+        
+        // ⭐ 유찰 경매 여부에 따라 대기 메시지 업데이트
+        const phaseMessage = data.isFailedAuction ? '2차 유찰 경매 대기 중...' : '다음 경매 대기 중...';
+        waitInfo.querySelector('h3').textContent = phaseMessage;
+        
+        // 경매 정보 초기화
+        itemNameDisplay.textContent = '--';
+        itemPositionDisplay.textContent = '--';
+        currentPriceDisplay.textContent = '0';
+        topBidderDisplay.textContent = '없음';
+        bidInput.value = 10;
+        
+        updateBidButtonState(); // 입찰 버튼 비활성화
+        
+        // 경매 순서 목록에서 현재 물품 하이라이트 해제
+        document.querySelectorAll('.auction-item-list li').forEach(li => li.classList.remove('item-status-current'));
+    });
+
+    // 경매 시작
+    socket.on('auction_start', (data) => { // 서버에서 { item: ..., phase: ... } 형태로 전송
+        waitInfo.style.display = 'none';
+        auctionTitle.style.display = 'block';
+        
+        currentItemId = data.item.id;
+        currentItemPosition = data.item.position; // 포지션 저장 (소문자)
+        currentBidPrice = 0;
+        currentTopBidderId = null; 
+
+        // ⭐ 경매 단계에 따라 제목 업데이트
+        auctionTitle.textContent = (data.phase === 'Bidding_Failed' ? '2차 유찰 경매' : '현재 경매');
+
+        itemNameDisplay.textContent = data.item.name;
+        itemPositionDisplay.textContent = data.item.position.toUpperCase();
+        currentPriceDisplay.textContent = currentBidPrice;
+        topBidderDisplay.textContent = '없음';
+
+        // 입찰 창 초기화
+        bidInput.value = 10; 
+        updateBidButtonState(); // 새로운 경매 시작 시 버튼 상태 업데이트
+
+        logMessage(`[경매 시작] ${data.item.name} (${data.item.position.toUpperCase()}) 경매 시작!`, '#007bff');
+    });
+
+    // ... (나머지 스크립트 코드는 동일하게 유지)
+    socket.on('full_server', (message) => {
+        alert(message);
+    });
+
+    socket.on('error_message', (message) => {
+        logMessage(`[오류] ${message}`, 'red');
+    });
+
+    socket.on('update_timer', (data) => {
+        if (currentItemId === data.itemId) {
+            timerDisplay.textContent = data.time;
+        }
+    });
+
+    socket.on('update_bid', (data) => {
+        if (currentItemId === data.itemId) {
+            currentBidPrice = data.price;
+            currentTopBidderId = data.bidderId; // 서버에서 bidderId를 보내는 부분이 없으므로 bidder 닉네임으로 처리해야 함
+            
+            // 서버에서 topBidderId만 보내지 않고 닉네임을 보내므로, 여기서는 닉네임만 표시합니다.
+            currentPriceDisplay.textContent = data.price;
+            topBidderDisplay.textContent = data.bidder;
+            logMessage(`[입찰] ${data.bidder}: ${data.price}p`, '#ffc107');
+            updateBidButtonState();
+        }
+    });
+    
+    socket.on('auction_result', (data) => {
+        let message;
+        let color;
+        if (data.status === 'ACQUIRED') {
+            message = `[낙찰] ${data.item.name} 선수, ${data.winner}에게 ${data.item.finalPrice}p에 낙찰!`;
+            color = 'green';
+        } else {
+            message = `[유찰] ${data.item.name} 선수 경매 실패!`;
+            color = 'orange';
+        }
+        logMessage(message, color);
+        // 경매 결과가 나온 후 입찰 버튼 비활성화 (Wait_Next_Item 페이즈로 전환)
+        updateBidButtonState(); 
+    });
+
+    socket.on('auto_acquisition', (data) => {
+        logMessage(`[자동 낙찰] ${data.item.name} (${data.item.position.toUpperCase()}) 선수, ${data.winner}에게 0원에 자동 낙찰되었습니다.`, 'purple');
+    });
+    
+
+    socket.on('player_status_update', (playerStatuses) => {
+        playerStatusPanel.innerHTML = '';
+        let myAcquiredRoster = {}; // 내 로스터 상태를 추적할 임시 객체
+
+        playerStatuses.forEach(p => {
+            const isMe = p.id === myId;
+            let canBid = p.canBid; // 서버에서 받은 입찰 가능 여부
+            let bidRestriction = '';
+            
+            if (isMe) {
+                myPoints = p.points;
+                myPointsDisplay.textContent = myPoints;
+            }
+
+            // 포지션별 로스터 카운트 업데이트 및 메시지 준비
+            let rosterHtml = '';
+            myAcquiredRoster = { top: 0, mid: 0, sup: 0, jungle: 0, ad: 0 };
+            p.roster.forEach(item => {
+                myAcquiredRoster[item.position]++;
+                rosterHtml += `<span style="font-size:0.8em; margin-right:5px; padding: 2px 5px; background:#ddd; border-radius:3px;">${item.position.toUpperCase()}: ${item.name} (${item.price}p)</span>`;
+            });
+
+            // 포지션 제한 메시지 (나에게만 해당)
+            if (isMe && currentItemPosition && myAcquiredRoster[currentItemPosition] >= MAX_POS_PER_PLAYER) {
+                 bidRestriction = `<span style="color:red; font-weight:bold;">(${currentItemPosition.toUpperCase()} 포지션 제한 초과)</span>`;
+                 canBid = false; // 서버에서 이미 계산했지만, 로컬에서도 확인
+            }
+            if (isMe) {
+                myRoster = myAcquiredRoster; // 내 로스터 상태 갱신
+            }
+
+            const card = document.createElement('div');
+            card.className = `player-card ${p.isTopBidder ? 'current-bidder' : ''} ${!canBid ? 'player-cannot-bid' : ''}`;
+            card.innerHTML = `
+                <strong>${p.nickname}${isMe ? ' (나)' : ''}</strong>
+                <p>잔여 포인트: ${p.points}p</p>
+                <div class="roster-list">
+                    <strong>로스터:</strong> ${rosterHtml || '없음'}
+                </div>
+                ${isMe ? bidRestriction : ''}
+            `;
+            playerStatusPanel.appendChild(card);
+        });
+
+        updateBidButtonState(); // 로스터 상태 및 최고 입찰자 상태 변경 시 버튼 상태 갱신
+    });
+
+    socket.on('auction_status_update', (auctionStatus) => {
+        auctionStatusList.innerHTML = '';
+        auctionStatus.forEach(item => {
+            const li = document.createElement('li');
+            const isCurrent = item.id === currentItemId;
+            
+            li.className = `item-status-${item.status}${isCurrent ? ' item-status-current' : ''}`;
+            li.textContent = `${item.sequence}. ${item.name} (${item.position.toUpperCase()}) - ${
+                item.status === 'ACQUIRED' ? '낙찰' : 
+                item.status === 'FAILED' ? '유찰' : '대기'
+            }`;
+            auctionStatusList.appendChild(li);
+        });
+    });
+
+
+    // --- UI/클라이언트 측 로직 ---
+
+    function logMessage(message, color) {
+        const p = document.createElement('p');
+        p.style.color = color;
+        p.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        log.prepend(p);
+        // 로그가 너무 길어지지 않도록 최신 50개만 유지
+        while (log.children.length > 50) {
+            log.removeChild(log.lastChild);
+        }
+    }
+
+    function setNicknameAndPoints() {
+        const nickname = nicknameInput.value.trim();
+        const points = parseInt(startPointsInput.value);
+        if (nickname.length > 0 && points > 0 && points % 10 === 0) {
+            socket.emit('set_nickname_and_points', { nickname, points });
+            lobbyStatus.textContent = '닉네임/포인트 설정 완료. 준비 버튼을 눌러주세요.';
+            lobbyStatus.style.color = 'green';
+        } else {
+             lobbyStatus.textContent = '닉네임과 포인트(10p 단위, 0보다 크게)를 올바르게 설정해주세요.';
+             lobbyStatus.style.color = 'red';
+        }
+    }
+
+    function sendReady() {
+        if (myNickname && myPoints > 0) {
+            socket.emit('ready');
+            readyBtn.disabled = true;
+            lobbyStatus.textContent = '다른 플레이어의 준비를 기다리는 중...';
+        }
+    }
+
+    function sendBid() {
+        const bidPrice = parseInt(bidInput.value);
+        if (currentItemId && bidPrice >= 10 && bidPrice % 10 === 0) {
+            socket.emit('bid', bidPrice);
+        } else {
+            logMessage('유효하지 않은 입찰 금액입니다. 10 포인트 이상, 10 포인트 단위로 입력해주세요.', 'red');
+        }
+    }
+    
+    // 입찰 버튼 상태 업데이트 및 메시지 표시
+    function updateBidButtonState() {
+        const bidPrice = parseInt(bidInput.value) || 0;
+        const currentPrice = currentBidPrice;
+        const bidIncrement = 10;
+        const minStartBid = 10;
+        
+        let requiredPrice;
+        if (currentPrice === 0) {
+            requiredPrice = minStartBid;
+        } else {
+            requiredPrice = currentPrice + bidIncrement;
+        }
+
+        let canBidNow = true;
+        let restrictionMessage = '';
+
+        // 1. 경매 중이 아닐 때
+        if (!currentItemId) {
+            canBidNow = false;
+            restrictionMessage = '경매 대기 중입니다.';
+        }
+        // 2. 최고 입찰자일 때
+        else if (currentTopBidderId && currentTopBidderId === myNickname) {
+            canBidNow = false;
+            restrictionMessage = '당신이 최고 입찰자입니다. 다음 플레이어의 입찰을 기다리세요.';
+        }
+        // 3. 최소 입찰가 미만일 때
+        else if (bidPrice < requiredPrice) {
+            canBidNow = false;
+            restrictionMessage = `최소 입찰 금액: ${requiredPrice} 포인트`;
+        }
+        // 4. 포인트 부족
+        else if (bidPrice > myPoints) {
+            canBidNow = false;
+            restrictionMessage = `잔여 포인트가 부족합니다. (내 잔여: ${myPoints}p)`;
+        }
+        // 5. 포지션 제한
+        else if (currentItemPosition && myRoster[currentItemPosition] >= MAX_POS_PER_PLAYER) {
+            canBidNow = false;
+            restrictionMessage = `이미 ${currentItemPosition.toUpperCase()} 포지션 선수를 ${MAX_POS_PER_PLAYER}명 보유하고 있습니다.`;
+        }
+        
+        // 6. 10단위 체크
+        else if (bidPrice % bidIncrement !== 0) {
+            canBidNow = false;
+            restrictionMessage = `입찰은 ${bidIncrement}p 단위로만 가능합니다.`;
+        }
+        
+        bidButton.disabled = !canBidNow;
+        bidButton.textContent = canBidNow ? `입찰하기 (${bidPrice}p)` : '입찰 불가';
+        
+        // 입찰가 입력 필드 업데이트: 최소 입찰가보다 작은 경우, 최소 입찰가로 자동 설정
+        if (bidPrice < requiredPrice) {
+            // bidInput.value = requiredPrice; // 사용자 경험을 위해 자동 변경 대신 메시지만 표시
+        }
+
+
+        // 현재가가 0이면 최소 입찰가로 설정
+        if (currentPrice === 0 && bidInput.value < minStartBid) {
+            bidInput.value = minStartBid;
+        }
+
+
+        bidRestrictionMessage.textContent = restrictionMessage;
+    }
+
+
+    function increaseBid(amount) {
+        const currentVal = parseInt(bidInput.value) || 0;
+        bidInput.value = currentVal + amount;
+        updateBidButtonState();
+    }
+
+    function decreaseBid(amount) {
+        const currentVal = parseInt(bidInput.value) || 0;
+        let newVal = currentVal - amount;
+        // 최소 입찰 금액 아래로 내려가지 않도록 함
+        const minVal = currentBidPrice === 0 ? 10 : currentBidPrice + 10;
+        if (newVal < minVal) {
+             newVal = minVal;
+        }
+        bidInput.value = newVal > 0 ? newVal : 10;
+        updateBidButtonState();
+    }
+    
+    // 초기 상태에서 버튼 비활성화
+    document.addEventListener('DOMContentLoaded', () => {
+        updateBidButtonState();
+        nicknameInput.value = 'P' + Math.floor(Math.random() * 999);
+        startPointsInput.value = 1000;
+        
+        // 엔터키로 입찰 실행
+        bidInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                sendBid();
+            }
+        });
+    });
+
+</script>
+</body>
+</html>
