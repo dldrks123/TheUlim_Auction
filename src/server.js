@@ -16,6 +16,7 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 let auctionItems = []; // CSV에서 로드된 전체 12명의 선수 목록
 let initialAuctionItems = []; // 초기 경매 아이템 상태 저장용 (순서 고정)
 let connectedPlayers = {};
+let spectators = {}; // 관전자 관리용 객체 추가
 const MAX_PLAYERS = 3;
 
 let gameState = {
@@ -480,7 +481,7 @@ function loadCSV() {
             });
         })
         .on('end', () => {
-            shuffleArray(itemsBeforeShuffle);
+
             auctionItems = itemsBeforeShuffle;
             initialAuctionItems = JSON.parse(JSON.stringify(itemsBeforeShuffle));
             console.log(`✅ ${auctionItems.length}명의 선수 로딩 및 순서 랜덤 섞기 완료.`);
@@ -501,20 +502,31 @@ io.on('connection', (socket) => {
             startPoints: initialPoints,
             roster: { mid: 0, sup: 0, jungle: 0, ad: 0, top: 0, acquired: [] }
         };
-        socket.emit('player_info', { id: socket.id, nickname: connectedPlayers[socket.id].nickname, points: initialPoints });
+        // isSpectator: false 전달
+        socket.emit('player_info', { id: socket.id, nickname: connectedPlayers[socket.id].nickname, points: initialPoints, isSpectator: false });
         io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
 
         sendPlayerStatusUpdate();
         sendAuctionStatusUpdate();
 
     } else {
-        socket.emit('full_server', '서버에 최대 인원 3명이 접속해 있습니다.');
-        socket.disconnect();
+        // 관전자 처리 로직 시작
+        spectators[socket.id] = { nickname: `Spectator_${socket.id.substring(0,4)}` };
+        // 관전자는 포인트 0, isSpectator: true 전달
+        socket.emit('player_info', { id: socket.id, nickname: spectators[socket.id].nickname, points: 0, isSpectator: true });
+        
+        // 현재 로비 상황 및 경매 상황 동기화해서 보여주기
+        io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
+        sendPlayerStatusUpdate();
+        sendAuctionStatusUpdate();
         return;
     }
 
     // 닉네임과 시작 포인트 설정
     socket.on('set_nickname_and_points', (data) => {
+        // 관전자는 수정 불가
+        if (spectators[socket.id]) return;
+
         const { nickname, points } = data;
         if (connectedPlayers[socket.id] && nickname) {
             if (points % BID_INCREMENT !== 0 || points <= 0) {
@@ -531,11 +543,14 @@ io.on('connection', (socket) => {
 
             io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
             sendPlayerStatusUpdate();
-            socket.emit('player_info', { id: socket.id, nickname: connectedPlayers[socket.id].nickname, points: points });
+            socket.emit('player_info', { id: socket.id, nickname: connectedPlayers[socket.id].nickname, points: points, isSpectator: false });
         }
     });
 
     socket.on('ready', () => {
+        // 관전자는 준비 불가
+        if (spectators[socket.id]) return;
+
         if (connectedPlayers[socket.id] && !connectedPlayers[socket.id].ready && gameState.phase === 'Lobby') {
             connectedPlayers[socket.id].ready = true;
 
@@ -556,6 +571,9 @@ io.on('connection', (socket) => {
 
     // [경매: 입찰] 이벤트
     socket.on('bid', (newPrice) => {
+        // 관전자는 입찰 불가
+        if (spectators[socket.id]) return;
+
         if (gameState.phase !== 'Bidding_Main' && gameState.phase !== 'Bidding_Failed') return;
         if (!connectedPlayers[socket.id] || !gameState.currentItem) return;
 
@@ -619,6 +637,7 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         delete connectedPlayers[socket.id];
+        delete spectators[socket.id]; // 관전자 삭제 추가
         io.emit('lobby_update', { players: Object.values(connectedPlayers).map(p => ({ nickname: p.nickname, ready: p.ready })) });
         sendPlayerStatusUpdate();
     });
