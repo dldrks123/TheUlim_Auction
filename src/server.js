@@ -20,7 +20,7 @@ let spectators = {}; // 관전자 관리용 객체 추가
 const MAX_PLAYERS = 4;
 
 let gameState = {
-    phase: 'Lobby', 					// 'Lobby', 'Wait_Next_Item', 'Bidding_Main', 'Bidding_Failed', 'Finished'
+    phase: 'Lobby',                     // 'Lobby', 'Wait_Next_Item', 'Bidding_Main', 'Bidding_Failed', 'Finished'
     currentItemIndex: 0, // 1차 경매 순회용 인덱스 (0부터 initialAuctionItems.length-1까지)
     failedAuctionIndex: 0, // 2차 유찰 경매 순회용 인덱스 (0부터 failedItems.length-1까지)
     failedAuctionRound: 0, // 유찰 경매 순회 횟수 (무한 순환 추적용)
@@ -34,14 +34,18 @@ let gameState = {
 };
 
 // 경매 시간 및 규칙 상수
-const MAX_TIME = 12; 		// 일반 경매 시작 시간 12초
+const MAX_TIME = 15;        // 일반 경매 시작 시간 15초
 const FAILED_START_TIME = 15; // 유찰 경매 첫 매물 시간 15초
 const BID_INCREMENT = 10;
 const MIN_START_BID = 10;
-const ANTI_SNIPING_RESET = 7; // 입찰 시 타이머 리셋 시간 7초
+const ANTI_SNIPING_RESET = 10; // 입찰 시 타이머 리셋 시간 10초
 const DEFAULT_STARTING_POINTS = 1000;
 const MAX_POS_PER_PLAYER = 1; 
-const WAIT_TIME = 8; // 다음 경매 전 대기 시간 5초
+const WAIT_TIME = 15; // 다음 경매 전 대기 시간 15초
+
+// 🌟 [추가] 유령 시간(Ghost Time) 버퍼 상수
+// 유저 화면에 0초가 되었을 때, 서버에서 백엔드적으로 추가 입찰을 더 받아줄 시간(초)입니다.
+const GHOST_BUFFER = 2; 
 
 // --- 헬퍼 함수 ---
 
@@ -283,7 +287,7 @@ function startPreAuctionWait() {
             nextItem = failedItems[gameState.failedAuctionIndex];
             isFailedAuction = true;
             
-            // 🚨 핵심 수정: 포지션 제한 건너뛰기 로직
+            // 포지션 제한 건너뛰기 로직
             const nextItemPosition = nextItem.position.toLowerCase();
             if (gameState.posAcquired[nextItemPosition] >= MAX_PLAYERS) {
                 // 해당 아이템을 'ACQUIRED'로 상태만 변경 (0원 처리), 경매 종료에 영향 X
@@ -357,15 +361,21 @@ function startNextItemAuction(item) {
     gameState.topBid = 0;
     gameState.topBidderId = null;
     
-    // 1차 경매(Bidding_Main)는 MAX_TIME(12초), 유찰 경매(Bidding_Failed)는 FAILED_START_TIME(15초)
-    gameState.timer = gameState.phase === 'Bidding_Main' ? MAX_TIME : FAILED_START_TIME;
+    // 🚨 [수정] 실제 서버 타이머 세팅 시 유령 시간(GHOST_BUFFER)을 더해서 설정합니다. (15초 + 2초 = 17초)
+    const baseTime = gameState.phase === 'Bidding_Main' ? MAX_TIME : FAILED_START_TIME;
+    gameState.timer = baseTime + GHOST_BUFFER;
 
     // 타이머 시작
     if (gameState.auctionInterval) clearInterval(gameState.auctionInterval);
     gameState.auctionInterval = setInterval(() => {
         gameState.timer--;
-        io.emit('update_timer', { itemId: gameState.currentItem.id, time: gameState.timer });
+        
+        // 🚨 [수정] 클라이언트(유저 화면)에는 실제 타이머에서 버퍼(2초)를 뺀 시간만 보냅니다.
+        // Math.max를 써서 0초 밑으로 내려가지 않고 0초에서 딱 멈추도록 가드를 칩니다.
+        let displayTime = Math.max(0, gameState.timer - GHOST_BUFFER);
+        io.emit('update_timer', { itemId: gameState.currentItem.id, time: displayTime });
 
+        // 서버의 실제 타임아웃 종료 처리는 0초가 되었을 때 수행합니다.
         if (gameState.timer <= 0) {
             checkEndOfAuction();
         }
@@ -427,9 +437,9 @@ function sendPlayerStatusUpdate() {
             canBid = false;
         }
         
-        // 3. 🛑 포지션 제한 체크 (해당 포지션 선수를 1명 보유했으면 입찰 불가)
+        // 3. 포지션 제한 체크 (해당 포지션 선수를 1명 보유했으면 입찰 불가)
         if (itemPosition && player.roster[itemPosition] >= MAX_POS_PER_PLAYER) { 
-            canBid = false; // 🛑 이 플레이어는 이 포지션에 대해 입찰 불가
+            canBid = false; // 이 플레이어는 이 포지션에 대해 입찰 불가
         }
         
         // 4. 포인트 부족 시 입찰 불가 (클라이언트에서 처리)
@@ -581,7 +591,7 @@ io.on('connection', (socket) => {
         const itemPosition = gameState.currentItem.position; 
         const player = connectedPlayers[socket.id];
 
-        // 1. 🛑 포지션별 1명 제한 체크 (MAX_POS_PER_PLAYER = 1 적용)
+        // 1. 포지션별 1명 제한 체크 (MAX_POS_PER_PLAYER = 1 적용)
         if (player.roster[itemPosition] >= MAX_POS_PER_PLAYER) {
             return socket.emit('error_message', `${itemPosition.toUpperCase()} 포지션 선수는 이미 ${MAX_POS_PER_PLAYER}명을 보유하고 있어 더 이상 입찰할 수 없습니다.`);
         }
@@ -619,10 +629,14 @@ io.on('connection', (socket) => {
         gameState.topBid = newPrice;
         gameState.topBidderId = socket.id;
 
-        // 안티 스나이핑: 모든 입찰 시 타이머 리셋
-        gameState.timer = ANTI_SNIPING_RESET;
-        io.emit('update_timer', { itemId: gameState.currentItem.id, time: gameState.timer });
-        console.log(`[Bid] ${player.nickname} ${newPrice}p 입찰. 타이머 ${ANTI_SNIPING_RESET}초로 리셋.`);
+        // 🚨 [수정] 안티 스나이핑: 입찰 발생 시 타이머 리셋할 때도 유령 시간(GHOST_BUFFER)을 더해줍니다.
+        // 이렇게 하면 화면에는 10초가 찍히지만, 서버의 실제 잔여 시간은 12초가 됩니다.
+        gameState.timer = ANTI_SNIPING_RESET + GHOST_BUFFER;
+
+        // 즉시 화면 업데이트를 전송하여 클라이언트가 변경된 안티 스나이핑 시간을 즉각 인지하게 합니다.
+        let displayTime = Math.max(0, gameState.timer - GHOST_BUFFER);
+        io.emit('update_timer', { itemId: gameState.currentItem.id, time: displayTime });
+        console.log(`[Bid] ${player.nickname} ${newPrice}p 입찰. 타이머 디스플레이 ${displayTime}초(실제 서버 ${gameState.timer}초)로 리셋.`);
 
         // 입찰가 자동 변경 방지
         io.emit('update_bid', {
