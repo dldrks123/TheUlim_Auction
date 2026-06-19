@@ -13,11 +13,11 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // --- 상수 및 전역 상태 관리 변수 ---
-let auctionItems = []; // CSV에서 로드된 전체 12명의 선수 목록
+let auctionItems = []; // CSV에서 로드된 전체 16명의 선수 목록
 let initialAuctionItems = []; // 초기 경매 아이템 상태 저장용 (순서 고정)
 let connectedPlayers = {};
 let spectators = {}; // 관전자 관리용 객체 추가
-const MAX_PLAYERS = 3;
+const MAX_PLAYERS = 4;
 
 let gameState = {
     phase: 'Lobby', 					// 'Lobby', 'Wait_Next_Item', 'Bidding_Main', 'Bidding_Failed', 'Finished'
@@ -41,7 +41,7 @@ const MIN_START_BID = 10;
 const ANTI_SNIPING_RESET = 7; // 입찰 시 타이머 리셋 시간 7초
 const DEFAULT_STARTING_POINTS = 1000;
 const MAX_POS_PER_PLAYER = 1; 
-const WAIT_TIME = 5; // 다음 경매 전 대기 시간 5초
+const WAIT_TIME = 8; // 다음 경매 전 대기 시간 5초
 
 // --- 헬퍼 함수 ---
 
